@@ -8,9 +8,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
@@ -276,7 +278,7 @@ func (p *Provider) GetDiffSet(ctx context.Context) (DiffSet, error) {
 	if err != nil {
 		return DiffSet{}, err
 	}
-	return p.partitionDiffs(diffs), nil
+	return p.partitionDiffs(ctx, diffs)
 }
 
 // loadGitignorePatterns reads and parses .gitignore patterns from the repo root.
@@ -374,19 +376,23 @@ func matchGitignoreBody(relPath, body string) bool {
 		return err == nil && matched
 	}
 
+	// relPath is always slash-separated, so matching uses path.Match rather
+	// than filepath.Match: on Windows the latter treats "\" as the separator,
+	// which lets "*" run across "/" and made "/*.go" match "sub/x.go".
+
 	// Patterns without / match basename — unless anchored, where the pattern
 	// addresses that name at the root only.
 	if !strings.Contains(body, "/") {
-		target := filepath.Base(relPath)
+		target := path.Base(relPath)
 		if anchored {
 			target = relPath
 		}
-		matched, _ := filepath.Match(body, target)
+		matched, _ := path.Match(body, target)
 		return matched
 	}
 
 	// Patterns with / match against the full relative path
-	if matched, _ := filepath.Match(body, relPath); matched {
+	if matched, _ := path.Match(body, relPath); matched {
 		return true
 	}
 	// Also try matching against suffix of path, but not for anchored patterns:
@@ -432,25 +438,101 @@ func matchGitignoreDirectory(relPath, pattern string) bool {
 
 // partitionDiffs keeps diffs filtered by built-in directory rules available
 // for reporting while preserving the review input as the Included slice.
-func (p *Provider) partitionDiffs(diffs []model.Diff) DiffSet {
-	patterns := p.loadGitignorePatterns()
+//
+// .gitignore applies to tracked changes too: a changed file that the ignore
+// rules cover is dropped even when git still tracks it.
+func (p *Provider) partitionDiffs(ctx context.Context, diffs []model.Diff) (DiffSet, error) {
 	result := DiffSet{
 		Included: make([]model.Diff, 0, len(diffs)),
 		Excluded: make([]model.Diff, 0),
 	}
-	for _, d := range diffs {
-		path := d.NewPath
-		if path == "/dev/null" {
-			path = d.OldPath
+	paths := make([]string, len(diffs))
+	var candidates []string
+	for i, d := range diffs {
+		paths[i] = d.NewPath
+		if paths[i] == "/dev/null" {
+			paths[i] = d.OldPath
 		}
-		if isProviderDirExcluded(path) {
+		if !isProviderDirExcluded(paths[i]) {
+			candidates = append(candidates, paths[i])
+		}
+	}
+
+	isIgnored, err := p.ignoredPathsFilter(ctx, candidates)
+	if err != nil {
+		return DiffSet{}, err
+	}
+
+	for i, d := range diffs {
+		if isProviderDirExcluded(paths[i]) {
 			result.excludedAt = append(result.excludedAt, len(result.Included)+len(result.Excluded))
 			result.Excluded = append(result.Excluded, d)
-		} else if !p.isPathExcluded(path, patterns) {
+		} else if !isIgnored(paths[i]) {
 			result.Included = append(result.Included, d)
 		}
 	}
-	return result
+	return result, nil
+}
+
+// ignoredPathsFilter returns a predicate reporting which of paths the
+// repository's ignore rules exclude.
+//
+// Git decides, through one batched `git check-ignore` call, so the verdict is
+// exactly the one git itself would give: nested .gitignore files and their
+// negations, .git/info/exclude, core.excludesFile, and git's own glob rules on
+// every OS. --no-index makes tracked paths subject to the rules as well,
+// which is the project's intent for tracked changes.
+//
+// Only when git cannot answer does this fall back to the built-in matcher
+// over the root .gitignore, with a warning, since that approximation misses
+// nested files and some anchoring rules. A cancelled context is returned as
+// an error rather than papered over by the fallback.
+func (p *Provider) ignoredPathsFilter(ctx context.Context, paths []string) (func(string) bool, error) {
+	if len(paths) == 0 {
+		return func(string) bool { return false }, nil
+	}
+	ignored, err := p.gitIgnoredPaths(ctx, paths)
+	if err == nil {
+		return func(relPath string) bool { return ignored[relPath] }, nil
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	fmt.Fprintf(os.Stderr, "[ocr] WARNING: %v; falling back to root .gitignore matching\n", err)
+	patterns := p.loadGitignorePatterns()
+	return func(relPath string) bool { return p.isPathExcluded(relPath, patterns) }, nil
+}
+
+// gitIgnoredPaths runs `git check-ignore` once over paths, fed NUL-separated
+// on stdin so neither the argument-length limit nor unusual file names are a
+// concern, and returns the set git reports as ignored.
+func (p *Provider) gitIgnoredPaths(ctx context.Context, paths []string) (map[string]bool, error) {
+	var in bytes.Buffer
+	for _, rel := range paths {
+		// check-ignore rejects --literal-pathspecs, so a leading ":" would be
+		// read as pathspec magic; "./" keeps such a name literal.
+		if strings.HasPrefix(rel, ":") {
+			in.WriteString("./")
+		}
+		in.WriteString(rel)
+		in.WriteByte(0)
+	}
+	out, stderr, err := p.runGitSplitStdin(ctx, &in, "-c", "core.quotepath=false",
+		"check-ignore", "--no-index", "-z", "--stdin")
+	if err != nil {
+		// Exit status 1 means "none of the paths is ignored", not a failure.
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+			return nil, gitFailure("git check-ignore", stderr, err)
+		}
+	}
+	ignored := make(map[string]bool)
+	for rel := range strings.SplitSeq(out, "\x00") {
+		if rel != "" {
+			ignored[strings.TrimPrefix(rel, "./")] = true
+		}
+	}
+	return ignored, nil
 }
 
 // ---- Internal helpers ----
@@ -666,6 +748,7 @@ func (p *Provider) untrackedFileDiffs(ctx context.Context) ([]string, error) {
 			continue
 		}
 		if rerr != nil {
+			fmt.Fprintf(os.Stderr, "[ocr] WARNING: cannot read untracked file %s for review: %v\n", f, rerr)
 			continue
 		}
 
@@ -703,22 +786,19 @@ func (p *Provider) untrackedFileDiffs(ctx context.Context) ([]string, error) {
 }
 
 func (p *Provider) untrackedFilesList(ctx context.Context) ([]string, error) {
-	out, stderr, err := p.runGitSplit(ctx, "-c", "core.quotepath=false", "ls-files", "--others", "--exclude-standard")
+	// -z keeps names verbatim: a file name may begin or end with a space, and
+	// trimming one away made the later read fail and the file vanish.
+	out, stderr, err := p.runGitSplit(ctx, "-c", "core.quotepath=false", "ls-files", "-z", "--others", "--exclude-standard")
 	if err != nil {
 		return nil, gitFailure("git ls-files", stderr, err)
 	}
-	if out == "" {
-		return nil, nil
-	}
-	patterns := p.loadGitignorePatterns()
+	// --exclude-standard already applied git's ignore rules, so only the
+	// provider's directory blocklist is left to check. Those files are not
+	// read at all, as a vendored tree can be large.
 	var files []string
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		if !p.isPathExcluded(line, patterns) {
-			files = append(files, line)
+	for name := range strings.SplitSeq(out, "\x00") {
+		if name != "" && !isProviderDirExcluded(name) {
+			files = append(files, name)
 		}
 	}
 	return files, nil
@@ -752,8 +832,20 @@ func (p *Provider) runGit(ctx context.Context, args ...string) (string, error) {
 // included: a killed process reports the signal rather than the reason, and
 // the reason is what the caller needs.
 func (p *Provider) runGitSplit(ctx context.Context, args ...string) (string, string, error) {
+	return p.runGitSplitStdin(ctx, nil, args...)
+}
+
+// runGitSplitStdin is runGitSplit with stdin fed from the given reader; a nil
+// reader leaves stdin unconnected, exactly as runGitSplit does.
+func (p *Provider) runGitSplitStdin(ctx context.Context, stdin io.Reader, args ...string) (string, string, error) {
 	if p.runner != nil {
-		stdout, stderr, err := p.runner.RunSplit(ctx, p.repoDir, args...)
+		var stdout, stderr string
+		var err error
+		if stdin == nil {
+			stdout, stderr, err = p.runner.RunSplit(ctx, p.repoDir, args...)
+		} else {
+			stdout, stderr, err = p.runner.RunSplitStdin(ctx, p.repoDir, stdin, args...)
+		}
 		if ctx.Err() != nil && err != nil {
 			return "", "", ctx.Err()
 		}
@@ -762,6 +854,9 @@ func (p *Provider) runGitSplit(ctx context.Context, args ...string) (string, str
 
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = p.repoDir
+	if stdin != nil {
+		cmd.Stdin = stdin
+	}
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

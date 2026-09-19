@@ -86,6 +86,26 @@ func (r *Runner) RunSplit(ctx context.Context, repoDir string, args ...string) (
 	return stdout.String(), stderr.String(), err
 }
 
+// RunSplitStdin is RunSplit with stdin fed from the given reader, for
+// commands such as `git check-ignore --stdin` that take their input in bulk.
+func (r *Runner) RunSplitStdin(ctx context.Context, repoDir string, stdin io.Reader, args ...string) (string, string, error) {
+	if err := r.acquire(ctx); err != nil {
+		return "", "", err
+	}
+	defer r.release()
+
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = repoDir
+	cmd.Stdin = stdin
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	return stdout.String(), stderr.String(), err
+}
+
 // Stream acquires the semaphore, starts a git command, and passes its stdout
 // as an io.Reader to consume. The semaphore is held for the full duration.
 // consume MUST fully drain the stdout reader before returning nil;

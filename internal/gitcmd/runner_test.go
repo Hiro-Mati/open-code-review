@@ -108,6 +108,32 @@ func TestRunner_RunSplit(t *testing.T) {
 	}
 }
 
+func TestRunner_RunSplitStdin(t *testing.T) {
+	dir := initRepo(t)
+	r := New(2)
+
+	stdout, _, err := r.RunSplitStdin(context.Background(), dir, strings.NewReader("hello\n"), "hash-object", "--stdin")
+	if err != nil {
+		t.Fatalf("RunSplitStdin error: %v", err)
+	}
+	want := strings.TrimSpace(func() string {
+		out, err := r.Run(context.Background(), dir, "rev-parse", "HEAD:hello.txt")
+		if err != nil {
+			t.Fatalf("rev-parse: %v", err)
+		}
+		return out
+	}())
+	if strings.TrimSpace(stdout) != want {
+		t.Errorf("RunSplitStdin stdout = %q, want %q", stdout, want)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := New(1).RunSplitStdin(ctx, dir, strings.NewReader(""), "status"); err == nil {
+		t.Error("expected error for cancelled context")
+	}
+}
+
 func TestRunner_Stream(t *testing.T) {
 	dir := initRepo(t)
 	r := New(2)
