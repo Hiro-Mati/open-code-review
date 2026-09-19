@@ -232,6 +232,84 @@ func TestLoadSummary_MissingFile(t *testing.T) {
 	}
 }
 
+// collidingRepoDirs returns two distinct repository paths that encode to the
+// same session directory: base/a-b/c and base/a/b-c both become ...-a-b-c.
+func collidingRepoDirs(t *testing.T) (string, string) {
+	t.Helper()
+	base := t.TempDir()
+	a := filepath.Join(base, "a-b", "c")
+	b := filepath.Join(base, "a", "b-c")
+	if encodeRepoPath(a) != encodeRepoPath(b) {
+		t.Fatalf("expected %q and %q to share a session directory", a, b)
+	}
+	return a, b
+}
+
+func TestListSessions_SkipsOtherRepoInSharedDirectory(t *testing.T) {
+	setTestHome(t, t.TempDir())
+	mine, other := collidingRepoDirs(t)
+
+	own := writeTestSession(t, mine, "main", "feature", nil, 1, 0, true)
+	foreign := writeTestSession(t, other, "main", "feature", nil, 1, 0, true)
+
+	got, err := ListSessions(mine)
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(got) != 1 || got[0].SessionID != own {
+		t.Fatalf("ListSessions(%q) = %+v, want only own session %q (foreign %q must be skipped)", mine, got, own, foreign)
+	}
+	if got[0].RepoDir != mine {
+		t.Errorf("RepoDir = %q, want %q", got[0].RepoDir, mine)
+	}
+
+	got, err = ListSessions(other)
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(got) != 1 || got[0].SessionID != foreign {
+		t.Fatalf("ListSessions(%q) = %+v, want only %q", other, got, foreign)
+	}
+}
+
+func TestLoadResumeState_RejectsOtherRepoInSharedDirectory(t *testing.T) {
+	setTestHome(t, t.TempDir())
+	mine, other := collidingRepoDirs(t)
+
+	foreign := writeTestSession(t, other, "main", "feature", nil, 1, 0, true)
+
+	if st, err := LoadResumeState(mine, foreign); err == nil {
+		t.Fatalf("LoadResumeState(%q) loaded a session recorded in %q", mine, st.RepoDir)
+	}
+	if st, err := LoadReviewResumeState(mine, foreign); err == nil {
+		t.Fatalf("LoadReviewResumeState(%q) loaded a session recorded in %q", mine, st.RepoDir)
+	}
+	st, err := LoadResumeState(other, foreign)
+	if err != nil {
+		t.Fatalf("LoadResumeState on the owning repo: %v", err)
+	}
+	if st.CompletedCount() != 1 {
+		t.Errorf("CompletedCount = %d, want 1", st.CompletedCount())
+	}
+}
+
+func TestSameRepoDir(t *testing.T) {
+	base := t.TempDir()
+	repo := filepath.Join(base, "repo")
+	if !sameRepoDir(repo, repo) {
+		t.Error("identical paths must match")
+	}
+	if !sameRepoDir(repo+string(filepath.Separator), repo) {
+		t.Error("a trailing separator must not matter")
+	}
+	if !sameRepoDir(filepath.ToSlash(repo), repo) {
+		t.Error("a forward-slash spelling (git --show-toplevel on Windows) must match")
+	}
+	if sameRepoDir(filepath.Join(base, "other"), repo) {
+		t.Error("different repositories must not match")
+	}
+}
+
 // writeTestSession creates a real JSONL session using the persistence layer
 // so tests exercise the same on-disk format that ListSessions consumes.
 // It returns the session id.

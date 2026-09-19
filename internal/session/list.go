@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -129,6 +130,12 @@ func ListSessions(repoDir string) ([]Summary, error) {
 		if err != nil {
 			continue
 		}
+		// Distinct repositories can encode to the same directory (a-b/c and
+		// a/b-c both become a-b-c), so the directory alone does not say whose
+		// session this is. The cwd it recorded does.
+		if !sameRepoDir(summary.RepoDir, repoDir) {
+			continue
+		}
 		summaries = append(summaries, *summary)
 	}
 	sort.Slice(summaries, func(i, j int) bool {
@@ -173,6 +180,19 @@ func LoadDetail(repoDir, sessionID string) (*Summary, []ItemDetail, error) {
 		summary.SessionID = sessionID
 	}
 	return summary, items, nil
+}
+
+// sameRepoDir reports whether a session's recorded repository directory names
+// repoDir. A session that recorded no cwd reports repoDir itself, so it always
+// matches: there is nothing to tell it apart by. Cleaning also folds the
+// forward slashes of a git --show-toplevel path on Windows. Windows and macOS
+// paths compare case-insensitively, as their default filesystems do.
+func sameRepoDir(recorded, repoDir string) bool {
+	a, b := filepath.Clean(recorded), filepath.Clean(repoDir)
+	if a == b {
+		return true
+	}
+	return (runtime.GOOS == "windows" || runtime.GOOS == "darwin") && strings.EqualFold(a, b)
 }
 
 func loadSummaryFromFile(path, sessionID, repoDir string) (*Summary, error) {

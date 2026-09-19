@@ -143,6 +143,12 @@ func loadResumeState(repoDir, sessionID string, skipUnparseable bool) (*ResumeSt
 			return nil, fmt.Errorf("read resume session %q: %w", sessionID, readErr)
 		}
 	}
+	// The session directory is shared by every repository whose path encodes to
+	// the same name, so a matching session id is not proof of ownership. Reusing
+	// another repository's checkpoints would pass its findings off as this one's.
+	if !sameRepoDir(state.RepoDir, repoDir) {
+		return nil, fmt.Errorf("resume session %q belongs to repository %s, not %s", sessionID, state.RepoDir, repoDir)
+	}
 	if state.SessionID == "" {
 		state.SessionID = sessionID
 	}

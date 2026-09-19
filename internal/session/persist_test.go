@@ -75,6 +75,21 @@ func TestEncodeRepoPath(t *testing.T) {
 				input:    "D:\\",
 				expected: "D_",
 			},
+			{
+				name:     "windows UNC path",
+				input:    `\\server\share\repo\sub`,
+				expected: "UNC-server-share-repo-sub",
+			},
+			{
+				name:     "windows UNC share only",
+				input:    `\\server\share\`,
+				expected: "UNC-server-share",
+			},
+			{
+				name:     "windows extended-length path",
+				input:    `\\?\C:\code\myapp`,
+				expected: "UNC-_-C_-code-myapp",
+			},
 		}...)
 	} else {
 		tests = append(tests, []struct {

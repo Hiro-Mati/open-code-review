@@ -85,6 +85,13 @@ func encodeRepoPath(p string) string {
 	// Trim leading path separators
 	p = strings.TrimLeft(p, "/\\")
 
+	if isUNCVolume(vol) {
+		vol = encodeUNCVolume(vol)
+		if p != "" {
+			vol += "-"
+		}
+	}
+
 	// Replace separators with -
 	p = strings.ReplaceAll(p, "/", "-")
 	p = strings.ReplaceAll(p, "\\", "-")
@@ -98,6 +105,39 @@ func encodeRepoPath(p string) string {
 		return "empty"
 	}
 	return result
+}
+
+// isUNCVolume reports whether vol, as returned by filepath.VolumeName, is a UNC
+// volume (\\server\share, or a \\?\ or \\.\ device prefix) rather than a drive
+// letter. filepath.VolumeName never returns one outside Windows.
+func isUNCVolume(vol string) bool {
+	return len(vol) >= 2 && isSeparatorByte(vol[0]) && isSeparatorByte(vol[1])
+}
+
+func isSeparatorByte(c byte) bool {
+	return c == '/' || c == '\\'
+}
+
+// encodeUNCVolume flattens a UNC volume into a single directory-name segment.
+// Kept verbatim, its separators would nest the session directory several levels
+// below the sessions root, where nothing that enumerates repositories one level
+// down would ever see it. Only UNC volumes take this path, so the encoding of
+// drive-letter and POSIX paths, and every session directory already on disk
+// for them, is unchanged.
+func encodeUNCVolume(vol string) string {
+	var b strings.Builder
+	b.WriteString("UNC-")
+	for _, r := range strings.Trim(vol, "/\\") {
+		switch r {
+		case '/', '\\':
+			b.WriteByte('-')
+		case ':', '?', '*', '"', '<', '>', '|':
+			b.WriteByte('_')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 func (jw *jsonlWriter) open() error {

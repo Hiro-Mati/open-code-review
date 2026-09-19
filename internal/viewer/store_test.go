@@ -6,8 +6,11 @@ package viewer
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
+
+	"github.com/alibaba/open-code-review/internal/session"
 )
 
 func writeJSONL(t *testing.T, path string, lines ...string) {
@@ -249,6 +252,39 @@ func TestDiscoverRepos_SkipsDirsWithNoJSONL(t *testing.T) {
 	}
 	if len(repos) != 0 {
 		t.Errorf("expected 0 repos for dir with no .jsonl, got %d", len(repos))
+	}
+}
+
+func TestDiscoverRepos_FindsUNCRepoSessions(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("UNC volumes exist only on Windows")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	const repo = `\\server\share\repo`
+	sh := session.New(repo, "main", "test-model", session.SessionOptions{ReviewMode: session.ReviewModeRange})
+	if err := sh.Finalize(); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	dir, err := session.SessionsDir(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The sessions root, taken from a drive-letter repo that is one level down.
+	driveDir, err := session.SessionsDir(`C:\code\myapp`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Dir(driveDir)
+
+	repos, err := DiscoverRepos(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repos) != 1 || repos[0].EncodedPath != filepath.Base(dir) || repos[0].SessionCount != 1 {
+		t.Fatalf("DiscoverRepos = %+v, want the one UNC repo session under %q", repos, dir)
 	}
 }
 
