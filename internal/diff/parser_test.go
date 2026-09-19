@@ -272,3 +272,135 @@ index 1234567..89abcde 100644
 		t.Errorf("Insertions = %d, want 1", d.Insertions)
 	}
 }
+
+// TestParseDiffText_QuotedHeaderStartsNewFile guards against a C-quoted
+// "diff --git" header being missed. Git quotes a path containing '"', '\' or
+// a control character even under core.quotepath=false; an unmatched header
+// folds the file's hunks into the previous file's diff.
+func TestParseDiffText_QuotedHeaderStartsNewFile(t *testing.T) {
+	diffText := `diff --git a/a.go b/a.go
+index 1234567..89abcde 100644
+--- a/a.go
++++ b/a.go
+@@ -1 +1,2 @@
+ package a
++var A = 1
+diff --git "a/b\"q.go" "b/b\"q.go"
+new file mode 100644
+index 0000000..7654321
+--- /dev/null
++++ "b/b\"q.go"
+@@ -0,0 +1,2 @@
++package q
++func Secret() {}
+diff --git "a/tab\there\\x.go" "b/tab\there\\x.go"
+index 1234567..89abcde 100644
+--- "a/tab\there\\x.go"
++++ "b/tab\there\\x.go"
+@@ -1 +1 @@
+-old
++new
+`
+	diffs, err := ParseDiffText(context.Background(), diffText, t.TempDir(), "", nil)
+	if err != nil {
+		t.Fatalf("ParseDiffText: %v", err)
+	}
+	if len(diffs) != 3 {
+		t.Fatalf("expected 3 diffs, got %d", len(diffs))
+	}
+	if diffs[0].NewPath != "a.go" || diffs[0].Insertions != 1 {
+		t.Errorf("diffs[0] = %q with %d insertions, want a.go with 1", diffs[0].NewPath, diffs[0].Insertions)
+	}
+	if strings.Contains(diffs[0].Diff, "Secret") {
+		t.Errorf("a.go diff absorbed the quoted file's hunk:\n%s", diffs[0].Diff)
+	}
+	if d := diffs[1]; d.OldPath != `b"q.go` || d.NewPath != `b"q.go` || !d.IsNew || d.Insertions != 2 {
+		t.Errorf("diffs[1] = old %q new %q IsNew=%v ins=%d, want b\"q.go new with 2 insertions",
+			d.OldPath, d.NewPath, d.IsNew, d.Insertions)
+	}
+	if d := diffs[2]; d.NewPath != "tab\there\\x.go" {
+		t.Errorf("diffs[2].NewPath = %q, want %q", d.NewPath, "tab\there\\x.go")
+	}
+}
+
+// TestParseDiffText_QuotedRename covers renames where only one side needs
+// quoting, including octal escapes in the "rename to" line.
+func TestParseDiffText_QuotedRename(t *testing.T) {
+	diffText := `diff --git a/plain.go "b/new\"\303\251.go"
+similarity index 100%
+rename from plain.go
+rename to "new\"\303\251.go"
+diff --git "a/old\\x.go" b/renamed.go
+similarity index 100%
+rename from "old\\x.go"
+rename to renamed.go
+`
+	diffs, err := ParseDiffText(context.Background(), diffText, t.TempDir(), "", nil)
+	if err != nil {
+		t.Fatalf("ParseDiffText: %v", err)
+	}
+	if len(diffs) != 2 {
+		t.Fatalf("expected 2 diffs, got %d", len(diffs))
+	}
+	if d := diffs[0]; d.OldPath != "plain.go" || d.NewPath != "new\"\xc3\xa9.go" || !d.IsRenamed {
+		t.Errorf("diffs[0] = old %q new %q renamed=%v", d.OldPath, d.NewPath, d.IsRenamed)
+	}
+	if d := diffs[1]; d.OldPath != `old\x.go` || d.NewPath != "renamed.go" || !d.IsRenamed {
+		t.Errorf("diffs[1] = old %q new %q renamed=%v", d.OldPath, d.NewPath, d.IsRenamed)
+	}
+}
+
+// TestParseDiffText_PathContainingSpaceB guards against splitting an
+// unquoted header at a " b/" that belongs to the path itself. For a
+// non-rename both halves are the same path, which fixes the split.
+func TestParseDiffText_PathContainingSpaceB(t *testing.T) {
+	diffText := `diff --git a/x b/y.go b/x b/y.go
+index 1234567..89abcde 100644
+--- a/x b/y.go
++++ b/x b/y.go
+@@ -1 +1,2 @@
+ package y
++var V = 1
+`
+	diffs, err := ParseDiffText(context.Background(), diffText, t.TempDir(), "", nil)
+	if err != nil {
+		t.Fatalf("ParseDiffText: %v", err)
+	}
+	if len(diffs) != 1 {
+		t.Fatalf("expected 1 diff, got %d", len(diffs))
+	}
+	if d := diffs[0]; d.OldPath != "x b/y.go" || d.NewPath != "x b/y.go" {
+		t.Errorf("paths = old %q new %q, want both %q", d.OldPath, d.NewPath, "x b/y.go")
+	}
+}
+
+// TestParseDiffHeader_Malformed checks that lines which only resemble a
+// header are rejected rather than producing empty or partial paths.
+func TestParseDiffHeader_Malformed(t *testing.T) {
+	for _, line := range []string{
+		"diff --git ",
+		"diff --git a/",
+		"diff --git a/x",
+		"diff --git a/ b/x",
+		"diff --git a/x b/",
+		"diff --git x/y b/y",
+		`diff --git "a/x`,
+		`diff --git "a/x""b/x"`,
+		`diff --git "a/x" "b/x" trailing`,
+		`diff --git "a/\q" "b/x"`,
+		`diff --git "a/\1" "b/x"`,
+		`diff --git a/x "b/x`,
+		`diff --git "a/x" c/x`,
+		"diff --cc file.go",
+	} {
+		if o, n, ok := parseDiffHeader(line); ok {
+			t.Errorf("parseDiffHeader(%q) = %q, %q, true; want not ok", line, o, n)
+		}
+	}
+	if s := unquoteGitPath(`"a\a\b\t\n\v\f\r\"\\\101"`); s != "a\a\b\t\n\v\f\r\"\\A" {
+		t.Errorf("unquoteGitPath decoded escapes to %q", s)
+	}
+	if s := unquoteGitPath(`"broken`); s != `"broken` {
+		t.Errorf("unquoteGitPath kept %q, want input unchanged", s)
+	}
+}

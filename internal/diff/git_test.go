@@ -766,3 +766,66 @@ func TestCommitDiffMergeCommitReviewsFirstParentDiff(t *testing.T) {
 		t.Error("NewFileContent is empty: content was not read at the merge commit")
 	}
 }
+
+// TestCommitDiffSeparatesQuotedPath runs real git on a commit touching a
+// path that git C-quotes even under core.quotepath=false. The quoted file
+// must come back as its own diff, not folded into the previous file's.
+func TestCommitDiffSeparatesQuotedPath(t *testing.T) {
+	repo := initBareRepo(t)
+	writeCommit(t, repo, "a.go", "package a\n", "c1")
+	if err := os.WriteFile(filepath.Join(repo, "a.go"), []byte("package a\n\nvar A = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, repo, "add", "a.go")
+	// '"' is not a valid Windows file name character, so stage the blob
+	// straight into the index instead of writing it to the work tree.
+	src := filepath.Join(t.TempDir(), "q.txt")
+	if err := os.WriteFile(src, []byte("package q\n\nfunc Secret() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	blob := gitOut(t, repo, "hash-object", "-w", src)
+	runGitTest(t, repo, "-c", "core.protectNTFS=false", "update-index", "--add", "--cacheinfo", "100644,"+blob+",b\"q.go")
+	runGitTest(t, repo, "commit", "-q", "-m", "c2")
+
+	diffs, err := NewCommitProvider(repo, "HEAD", gitcmd.New(0)).GetDiff(context.Background())
+	if err != nil {
+		t.Fatalf("GetDiff: %v", err)
+	}
+	var paths []string
+	for _, d := range diffs {
+		paths = append(paths, d.NewPath)
+	}
+	if !slices.Equal(paths, []string{"a.go", `b"q.go`}) {
+		t.Fatalf("NewPaths = %q, want [a.go b\"q.go]", paths)
+	}
+	if strings.Contains(diffs[0].Diff, "Secret") {
+		t.Errorf("a.go diff absorbed the quoted file's hunk:\n%s", diffs[0].Diff)
+	}
+	if !strings.Contains(diffs[1].NewFileContent, "func Secret") {
+		t.Errorf("quoted file content not read at ref: %q", diffs[1].NewFileContent)
+	}
+}
+
+// TestWorkspaceDiffPathContainingSpaceB runs real git on a modified file
+// whose path contains " b/", which an "a/(.+?) b/(.+)" split cuts early.
+func TestWorkspaceDiffPathContainingSpaceB(t *testing.T) {
+	repo := initBareRepo(t)
+	if err := os.MkdirAll(filepath.Join(repo, "x b"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeCommit(t, repo, "x b/y.go", "package y\n", "c1")
+	if err := os.WriteFile(filepath.Join(repo, "x b", "y.go"), []byte("package y\n\nvar V = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	diffs, err := NewWorkspaceProvider(repo, gitcmd.New(0)).GetDiff(context.Background())
+	if err != nil {
+		t.Fatalf("GetDiff: %v", err)
+	}
+	if len(diffs) != 1 {
+		t.Fatalf("expected 1 diff, got %d", len(diffs))
+	}
+	if d := diffs[0]; d.NewPath != "x b/y.go" || !strings.Contains(d.NewFileContent, "var V = 1") {
+		t.Errorf("NewPath = %q, content %q; want x b/y.go with the modified content", d.NewPath, d.NewFileContent)
+	}
+}
