@@ -602,7 +602,14 @@ func (a *Agent) dispatchSubtasks(ctx context.Context) ([]model.LlmComment, error
 	}
 
 	failed := atomic.LoadInt64(&a.subtaskFailed)
-	if failed > 0 && failed == dispatched {
+	reused := int64(0)
+	if a.resumeInfo != nil {
+		reused = a.resumeInfo.ReusedFiles
+	}
+	// As in review: a resumed run whose every fresh file fails still carries the
+	// findings it reused, so it is a partial result, not a failed run. Erroring
+	// here would discard those findings, since the caller emits nothing on error.
+	if failed > 0 && failed == dispatched && reused == 0 {
 		return nil, fmt.Errorf("all %d file scan(s) failed — check your LLM configuration and API key", dispatched)
 	}
 	return a.args.CommentCollector.Comments(), nil

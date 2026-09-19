@@ -829,6 +829,61 @@ func TestDispatchSubtasks_AllFailed(t *testing.T) {
 	}
 }
 
+func TestDispatchSubtasks_ResumeKeepsReusedWhenAllFreshFail(t *testing.T) {
+	client := &errorScanClient{err: context.DeadlineExceeded}
+
+	cachedItem := model.ScanItem{Path: "cached.go", Content: "package cached\n", LineCount: 1}
+	freshItem := model.ScanItem{Path: "fresh.go", Content: "package fresh\n", LineCount: 1}
+	cachedComment := model.LlmComment{Path: "cached.go", Content: "cached finding"}
+	resume := &session.ResumeState{
+		SessionID:  "prior-session",
+		ReviewMode: session.ReviewModeFullScan,
+		Items: map[string]session.ResumeItem{
+			scanItemFingerprint(cachedItem): {
+				FilePath:    cachedItem.Path,
+				OldPath:     cachedItem.Path,
+				NewPath:     cachedItem.Path,
+				Fingerprint: scanItemFingerprint(cachedItem),
+				Comments:    []model.LlmComment{cachedComment},
+			},
+		},
+	}
+
+	tpl := makeTemplateWithFullScan()
+	tpl.MaxTokens = 100000
+
+	a := NewAgent(Args{
+		Template:         tpl,
+		LLMClient:        client,
+		Model:            "test",
+		CommentCollector: tool.NewCommentCollector(),
+		Tools:            tool.NewRegistry(),
+		MaxConcurrency:   1,
+		SkipPlan:         true,
+		SkipDedup:        true,
+		SkipSummary:      true,
+		Resume:           resume,
+		Session: session.New(t.TempDir(), "main", "test", session.SessionOptions{
+			ReviewMode:  session.ReviewModeFullScan,
+			ResumedFrom: resume.SessionID,
+		}),
+	})
+	a.items = []model.ScanItem{cachedItem, freshItem}
+	a.currentDate = "2026-06-26"
+	a.args.Tools.Freeze()
+
+	comments, err := a.dispatchSubtasks(context.Background())
+	if err != nil {
+		t.Fatalf("a resumed scan with a reused file must not fail when every fresh file fails: %v", err)
+	}
+	if len(comments) != 1 || comments[0].Content != cachedComment.Content {
+		t.Fatalf("comments = %+v, want the reused finding", comments)
+	}
+	if warnings := a.Warnings(); len(warnings) != 1 || warnings[0].File != freshItem.Path {
+		t.Fatalf("warnings = %+v, want one for the failed fresh file", warnings)
+	}
+}
+
 func TestDispatchSubtasks_WithoutTaskDoneIsAllFailed(t *testing.T) {
 	empty := ""
 	client := &fakeScanClient{responses: []*llm.ChatResponse{{
