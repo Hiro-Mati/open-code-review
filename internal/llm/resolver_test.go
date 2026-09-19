@@ -5,10 +5,14 @@ package llm
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -1732,6 +1736,149 @@ func TestResolveEndpoint_EnvExtraHeadersMergedWithConfigFile(t *testing.T) {
 	}
 	if v, ok := ep.ExtraHeaders["X-New"]; !ok || v != "from-env" {
 		t.Errorf("env header merged: ExtraHeaders[\"X-New\"] = %q, want %q", v, "from-env")
+	}
+}
+
+// TestResolveEndpoint_EnvExtraHeaderOverridesConfigCaseInsensitively pins that
+// OCR_LLM_EXTRA_HEADERS replaces a config header even when the two spell the
+// name differently. HTTP header names are case-insensitive; keeping both
+// spellings left two values for one header and map iteration order decided,
+// per request, which one reached the wire.
+func TestResolveEndpoint_EnvExtraHeaderOverridesConfigCaseInsensitively(t *testing.T) {
+	clearAllEnv(t)
+	t.Setenv("OCR_LLM_EXTRA_HEADERS", "x-team=from-env")
+
+	cfgPath, _ := writeResolverConfig(t, configFile{
+		Provider: "anthropic",
+		Providers: map[string]providerEntryConfig{
+			"anthropic": {
+				APIKey:       "sk-ant-test",
+				Model:        "claude-sonnet-4-6",
+				ExtraHeaders: map[string]string{"X-Team": "from-config", "X-Org-ID": "org-123"},
+			},
+		},
+	})
+
+	ep, err := ResolveEndpoint(cfgPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := map[string]string{"x-team": "from-env", "X-Org-ID": "org-123"}
+	if !mapsEqual(ep.ExtraHeaders, want) {
+		t.Errorf("ExtraHeaders = %v, want %v", ep.ExtraHeaders, want)
+	}
+}
+
+// TestResolveEndpoint_EnvExtraHeaderOverrideOnTheWire checks the same override
+// end to end: every request must carry the env value, never the config one.
+func TestResolveEndpoint_EnvExtraHeaderOverrideOnTheWire(t *testing.T) {
+	clearAllEnv(t)
+
+	seen := map[string]int{}
+	var mu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen[r.Header.Get("X-Team")]++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer server.Close()
+
+	t.Setenv("OCR_LLM_EXTRA_HEADERS", "x-team=from-env")
+	cfgPath, _ := writeResolverConfig(t, configFile{
+		Provider: "gw",
+		CustomProviders: map[string]providerEntryConfig{
+			"gw": {
+				APIKey:       "sk-test",
+				URL:          server.URL + "/v1",
+				Protocol:     "openai",
+				Model:        "m",
+				ExtraHeaders: map[string]string{"X-Team": "from-config"},
+			},
+		},
+	})
+
+	ep, err := ResolveEndpoint(cfgPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	client := NewLLMClient(ep, nil, nil)
+	const requests = 20
+	for i := 0; i < requests; i++ {
+		if _, err := client.CompletionsWithCtx(context.Background(), ChatRequest{
+			Messages: []Message{{Role: "user", Content: "ping"}},
+		}); err != nil {
+			t.Fatalf("CompletionsWithCtx: %v", err)
+		}
+	}
+	if seen["from-env"] != requests {
+		t.Errorf("X-Team values on the wire = %v, want from-env on all %d requests", seen, requests)
+	}
+}
+
+// TestResolveEndpoint_ConfigFileExtraHeadersReservedRejected pins that
+// extra_headers written directly in config.json get the same reserved-header
+// check as OCR_LLM_EXTRA_HEADERS and `ocr config set`. Before, an
+// "authorization" entry silently replaced the configured credential.
+func TestResolveEndpoint_ConfigFileExtraHeadersReservedRejected(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  configFile
+	}{
+		{
+			name: "custom provider",
+			cfg: configFile{
+				Provider: "gw",
+				CustomProviders: map[string]providerEntryConfig{
+					"gw": {
+						APIKey:       "real-key",
+						URL:          "https://gateway.example.com/v1",
+						Protocol:     "openai",
+						Model:        "m",
+						ExtraHeaders: map[string]string{"authorization": "Bearer other"},
+					},
+				},
+			},
+		},
+		{
+			name: "preset provider",
+			cfg: configFile{
+				Provider: "anthropic",
+				Providers: map[string]providerEntryConfig{
+					"anthropic": {
+						APIKey:       "sk-ant-test",
+						Model:        "claude-sonnet-4-6",
+						ExtraHeaders: map[string]string{"X-Api-Key": "other"},
+					},
+				},
+			},
+		},
+		{
+			name: "legacy llm config",
+			cfg: configFile{
+				Llm: llmFileConfig{
+					URL:          "https://api.example.com/v1/messages",
+					AuthToken:    "legacy-token",
+					Model:        "claude-opus-4-6",
+					ExtraHeaders: map[string]string{"X-Legacy": "yes", "Content-Type": "text/plain"},
+				},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clearAllEnv(t)
+			cfgPath, _ := writeResolverConfig(t, tt.cfg)
+
+			_, err := ResolveEndpoint(cfgPath)
+			if err == nil {
+				t.Fatal("expected error for reserved extra header in config file")
+			}
+			if !strings.Contains(err.Error(), "reserved") {
+				t.Errorf("error should mention reserved header, got: %v", err)
+			}
+		})
 	}
 }
 

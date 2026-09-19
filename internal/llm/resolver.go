@@ -7,9 +7,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -185,15 +187,31 @@ func finalizeResolvedEndpoint(source string, ep ResolvedEndpoint, env envOverrid
 		ep.Timeout = env.timeout
 	}
 	if env.headers != nil {
-		if ep.ExtraHeaders == nil {
-			ep.ExtraHeaders = env.headers
-		} else {
-			for key, value := range env.headers {
-				ep.ExtraHeaders[key] = value
-			}
-		}
+		ep.ExtraHeaders = mergeExtraHeaders(ep.ExtraHeaders, env.headers)
 	}
 	return ep
+}
+
+// mergeExtraHeaders layers override on top of base and returns a new map.
+// HTTP header names are case-insensitive, so a base entry whose name matches an
+// override name in any spelling is dropped: keeping both "X-Team" and "x-team"
+// would put two values for one header in the map, and whichever the client
+// happened to apply last (map iteration order) would reach the wire.
+func mergeExtraHeaders(base, override map[string]string) map[string]string {
+	merged := make(map[string]string, len(base)+len(override))
+	overridden := make(map[string]bool, len(override))
+	for key := range override {
+		overridden[http.CanonicalHeaderKey(key)] = true
+	}
+	for key, value := range base {
+		if !overridden[http.CanonicalHeaderKey(key)] {
+			merged[key] = value
+		}
+	}
+	for key, value := range override {
+		merged[key] = value
+	}
+	return merged
 }
 
 // parseTimeoutEnv reads and validates the OCR_LLM_TIMEOUT environment variable.
@@ -549,6 +567,9 @@ func tryProviderConfig(cfg configFile, modelOverride string) (ResolvedEndpoint, 
 
 	extraBody = entry.ExtraBody
 	extraHeaders := entry.ExtraHeaders
+	if err := validateExtraHeaders(extraHeaders); err != nil {
+		return ResolvedEndpoint{}, false, fmt.Errorf("provider %q: %w", cfg.Provider, err)
+	}
 
 	timeout, err := ValidateTimeoutSec(entry.TimeoutSec)
 	if err != nil {
@@ -669,6 +690,10 @@ func tryLegacyLlmConfig(cfg configFile, modelOverride string) (ResolvedEndpoint,
 
 	retryCodes, _, err := sanitizeRetryCodes(cfg.Llm.RetryCodes)
 	if err != nil {
+		return ResolvedEndpoint{}, false, fmt.Errorf("OCR config file: %w", err)
+	}
+
+	if err := validateExtraHeaders(cfg.Llm.ExtraHeaders); err != nil {
 		return ResolvedEndpoint{}, false, fmt.Errorf("OCR config file: %w", err)
 	}
 
@@ -848,6 +873,34 @@ var reservedHeaders = map[string]bool{
 	"user-agent":    true,
 }
 
+// checkReservedHeader rejects an extra header name that would override one of
+// the reservedHeaders.
+func checkReservedHeader(key string) error {
+	if reservedHeaders[strings.ToLower(strings.TrimSpace(key))] {
+		return fmt.Errorf("extra header %q conflicts with a reserved header; use the dedicated config field instead", key)
+	}
+	return nil
+}
+
+// validateExtraHeaders applies the reserved-header rule of ParseExtraHeaders to
+// extra_headers read straight from config.json, which never pass through
+// ParseExtraHeaders. Without it a hand-written "authorization" entry would
+// silently replace the api_key / auth_token credential on every request.
+// Names are checked in sorted order so the reported header is deterministic.
+func validateExtraHeaders(headers map[string]string) error {
+	keys := make([]string, 0, len(headers))
+	for key := range headers {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if err := checkReservedHeader(key); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // ParseExtraHeaders parses a string of comma-separated key=value pairs into a dictionary.
 // Values may be double-quoted to include commas, e.g. X-Forwarded-For="1.2.3.4,5.6.7.8".
 // Reserved header names (authorization, x-api-key, content-type, user-agent) are rejected
@@ -877,8 +930,8 @@ func ParseExtraHeaders(raw string) (map[string]string, error) {
 		if key == "" {
 			return nil, fmt.Errorf("invalid extra header %q: empty header name", pair)
 		}
-		if reservedHeaders[strings.ToLower(key)] {
-			return nil, fmt.Errorf("extra header %q conflicts with a reserved header; use the dedicated config field instead", key)
+		if err := checkReservedHeader(key); err != nil {
+			return nil, err
 		}
 		if len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' {
 			value = value[1 : len(value)-1]
