@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -15,6 +16,56 @@ import (
 	allowedext "github.com/alibaba/open-code-review/internal/config/allowlist"
 	"github.com/alibaba/open-code-review/internal/pathutil"
 )
+
+// expandBraces enumerates the alternatives of every brace group in s, nested
+// groups included: "src/{a,{b,c}}/*.go" yields "src/a/*.go", "src/b/*.go" and
+// "src/c/*.go". Matching does not use it (doublestar handles braces itself);
+// tests use it to inspect each arm of a pattern, such as the extension it
+// targets. A backslash escapes the next byte, as in doublestar. A pattern with
+// an unbalanced brace is returned unchanged.
+func expandBraces(s string) []string {
+	openIdx, closeIdx := -1, -1
+	var commas []int
+	depth := 0
+scan:
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '\\':
+			i++
+		case '{':
+			if depth == 0 {
+				openIdx = i
+			}
+			depth++
+		case ',':
+			if depth == 1 {
+				commas = append(commas, i)
+			}
+		case '}':
+			if depth == 0 {
+				continue
+			}
+			depth--
+			if depth == 0 {
+				closeIdx = i
+				break scan
+			}
+		}
+	}
+	if closeIdx < 0 {
+		return []string{s}
+	}
+
+	prefix, suffix := s[:openIdx], s[closeIdx+1:]
+	bounds := append(append([]int{openIdx}, commas...), closeIdx)
+	var results []string
+	for i := 0; i+1 < len(bounds); i++ {
+		// Recurse on the whole candidate so nested groups inside the option and
+		// further groups in the suffix are expanded too.
+		results = append(results, expandBraces(prefix+s[bounds[i]+1:bounds[i+1]]+suffix)...)
+	}
+	return results
+}
 
 func TestExpandBraces_NoBraces(t *testing.T) {
 	got := expandBraces("*.java")
@@ -53,6 +104,59 @@ func TestExpandBraces_UnclosedBrace(t *testing.T) {
 	got := expandBraces("*.{go,py")
 	if len(got) != 1 || got[0] != "*.{go,py" {
 		t.Errorf("expected original pattern, got %v", got)
+	}
+}
+
+func TestExpandBraces_Nested(t *testing.T) {
+	got := expandBraces("src/{a,{b,c}}/*.{go,py}")
+	want := []string{"src/a/*.go", "src/a/*.py", "src/b/*.go", "src/b/*.py", "src/c/*.go", "src/c/*.py"}
+	if !slices.Equal(got, want) {
+		t.Errorf("expandBraces = %v, want %v", got, want)
+	}
+}
+
+func TestNestedBracePatterns(t *testing.T) {
+	// The expansion used to close a group on the first "}", which turned
+	// "src/{a,{b,c}}/*.go" into "src/a}/*.go", "src/{b}/*.go" and
+	// "src/c}/*.go": only b still matched. doublestar parses nested groups.
+	const pat = "src/{a,{b,c}}/*.go"
+	f := &FileFilter{Include: []string{pat}, Exclude: []string{pat}}
+	r := &SystemRule{DefaultRule: "default", PathRules: []PathRule{{Pattern: pat, Rule: "R"}}}
+	pr := &ProjectRule{Rules: []ProjectRuleEntry{{Path: pat, Rule: "P"}}}
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{"src/a/x.go", true},
+		{"src/b/x.go", true},
+		{"SRC/C/X.GO", true},
+		{"src/d/x.go", false},
+		{"src/a/x.py", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			if got := f.IsUserExcluded(tt.path); got != tt.want {
+				t.Errorf("IsUserExcluded(%q) = %v, want %v", tt.path, got, tt.want)
+			}
+			if got := f.IsUserIncluded(tt.path); got != tt.want {
+				t.Errorf("IsUserIncluded(%q) = %v, want %v", tt.path, got, tt.want)
+			}
+			if got := r.Resolve(tt.path) == "R"; got != tt.want {
+				t.Errorf("Resolve(%q) matched = %v, want %v", tt.path, got, tt.want)
+			}
+			if got := matchProjectRuleEntry(pr, tt.path) != nil; got != tt.want {
+				t.Errorf("matchProjectRuleEntry(%q) matched = %v, want %v", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFileFilter_UnclosedBraceMatchesNothing(t *testing.T) {
+	f := &FileFilter{Exclude: []string{"*.{go,py"}}
+	for _, path := range []string{"main.go", "*.{go,py", "main.{go,py"} {
+		if f.IsUserExcluded(path) {
+			t.Errorf("IsUserExcluded(%q) = true for an invalid pattern, want false", path)
+		}
 	}
 }
 
@@ -1879,13 +1983,11 @@ func TestSystemRulesIntegrity(t *testing.T) {
 	})
 
 	t.Run("pattern_validity", func(t *testing.T) {
-		// Resolve expands braces before matching, so validate each expanded arm
-		// rather than the raw pattern (which may contain "{go,py}").
+		// Resolve hands the raw pattern, braces included, to doublestar, so
+		// validate it as written: an invalid pattern silently matches nothing.
 		for _, pr := range rule.PathRules {
-			for _, p := range expandBraces(pr.Pattern) {
-				if !doublestar.ValidatePattern(p) {
-					t.Errorf("pattern %q (expanded from %q) is not a valid glob", p, pr.Pattern)
-				}
+			if !doublestar.ValidatePattern(pr.Pattern) {
+				t.Errorf("pattern %q is not a valid glob", pr.Pattern)
 			}
 		}
 	})
