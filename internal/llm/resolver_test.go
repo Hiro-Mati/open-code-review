@@ -5,7 +5,10 @@ package llm
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1088,6 +1091,109 @@ func TestResolveEndpoint_ProviderAnthropicURLHasMessagesSuffix(t *testing.T) {
 	}
 	if ep.URL != "https://api.anthropic.com/v1/messages" {
 		t.Errorf("URL = %q, want %q", ep.URL, "https://api.anthropic.com/v1/messages")
+	}
+}
+
+// TestResolveEndpoint_AnthropicV1URLNormalized pins that every url+token
+// strategy normalizes an Anthropic base URL the same way the provider path
+// does. Without it, "<host>/v1" reached the client untouched and was expanded
+// to "<host>/v1/v1/messages", which every gateway answers with 404.
+func TestResolveEndpoint_AnthropicV1URLNormalized(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"https://api.example.com/v1", "https://api.example.com/v1/messages"},
+		{"https://api.example.com/v1/", "https://api.example.com/v1/messages"},
+		{"https://api.example.com", "https://api.example.com/v1/messages"},
+		{"https://api.example.com/v1/messages", "https://api.example.com/v1/messages"},
+	}
+	for _, tc := range cases {
+		t.Run("OCR environment "+tc.in, func(t *testing.T) {
+			clearAllEnv(t)
+			t.Setenv("OCR_LLM_URL", tc.in)
+			t.Setenv("OCR_LLM_TOKEN", "env-token")
+			t.Setenv("OCR_LLM_MODEL", "claude-test")
+
+			ep, err := ResolveEndpoint(filepath.Join(t.TempDir(), "nonexistent.json"))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if ep.URL != tc.want {
+				t.Errorf("URL = %q, want %q", ep.URL, tc.want)
+			}
+		})
+		t.Run("legacy llm config "+tc.in, func(t *testing.T) {
+			clearAllEnv(t)
+			cfgPath, _ := writeResolverConfig(t, configFile{
+				Llm: llmFileConfig{URL: tc.in, AuthToken: "legacy-token", Model: "claude-test"},
+			})
+
+			ep, err := ResolveEndpoint(cfgPath)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if ep.URL != tc.want {
+				t.Errorf("URL = %q, want %q", ep.URL, tc.want)
+			}
+		})
+	}
+}
+
+// TestResolveEndpoint_OpenAIURLNotGivenMessagesSuffix guards the other side of
+// the normalization: only the Anthropic protocol gets a /v1/messages suffix.
+func TestResolveEndpoint_OpenAIURLNotGivenMessagesSuffix(t *testing.T) {
+	clearAllEnv(t)
+	t.Setenv("OCR_LLM_URL", "https://api.openai.com/v1")
+	t.Setenv("OCR_LLM_TOKEN", "openai-token")
+	t.Setenv("OCR_LLM_MODEL", "gpt-4")
+	t.Setenv("OCR_USE_ANTHROPIC", "false")
+
+	ep, err := ResolveEndpoint(filepath.Join(t.TempDir(), "nonexistent.json"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ep.URL != "https://api.openai.com/v1" {
+		t.Errorf("URL = %q, want it unchanged", ep.URL)
+	}
+}
+
+// TestResolveEndpoint_OCREnvAnthropicV1URLReachesMessagesPath drives the
+// resolved endpoint through the real client against a local server, so the
+// request path on the wire is what is asserted, not just the resolved string.
+func TestResolveEndpoint_OCREnvAnthropicV1URLReachesMessagesPath(t *testing.T) {
+	clearAllEnv(t)
+
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		if r.URL.Path != "/v1/messages" {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"type":"error","error":{"type":"not_found_error","message":"not found"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_test","type":"message","role":"assistant","model":"claude-test","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	t.Setenv("OCR_LLM_URL", server.URL+"/v1")
+	t.Setenv("OCR_LLM_TOKEN", "env-token")
+	t.Setenv("OCR_LLM_MODEL", "claude-test")
+
+	ep, err := ResolveEndpoint(filepath.Join(t.TempDir(), "nonexistent.json"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	client := NewLLMClient(ep, nil, nil)
+	if _, err := client.CompletionsWithCtx(context.Background(), ChatRequest{
+		Messages:  []Message{{Role: "user", Content: "ping"}},
+		MaxTokens: 64,
+	}); err != nil {
+		t.Fatalf("CompletionsWithCtx: %v (request path %q)", err, gotPath)
+	}
+	if gotPath != "/v1/messages" {
+		t.Errorf("request path = %q, want %q", gotPath, "/v1/messages")
 	}
 }
 

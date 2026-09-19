@@ -295,6 +295,10 @@ func tryOCREnv(modelOverride string) (ResolvedEndpoint, bool, error) {
 		}
 	}
 
+	if protocol == ProtocolAnthropic {
+		url = ensureMessagesSuffix(url)
+	}
+
 	return ResolvedEndpoint{URL: url, Token: token, Model: model, Protocol: protocol, AuthHeader: authHeader, Source: "OCR environment"}, true, nil
 }
 
@@ -684,8 +688,13 @@ func tryLegacyLlmConfig(cfg configFile, modelOverride string) (ResolvedEndpoint,
 		token = resolved
 	}
 
+	url := cfg.Llm.URL
+	if protocol == ProtocolAnthropic {
+		url = ensureMessagesSuffix(url)
+	}
+
 	return ResolvedEndpoint{
-		URL:          cfg.Llm.URL,
+		URL:          url,
 		Token:        token,
 		Model:        model,
 		Protocol:     protocol,
