@@ -102,8 +102,9 @@ func groupIntoRounds(messages []llm.Message, start int) []round {
 }
 
 // computeActiveZoneSize returns how many trailing rounds fit within the
-// remaining token budget after accounting for the frozen zone and the
-// compressed summary.
+// remaining token budget. reservedTokens covers everything kept besides the
+// active rounds: the frozen zone (which already carries earlier summaries)
+// plus any estimate for the summary about to be appended.
 func computeActiveZoneSize(rounds []round, messages []llm.Message, maxTokens int, reservedTokens int) int {
 	budget := PromptTokenLimit(maxTokens) - reservedTokens
 	if budget <= 0 {
@@ -127,8 +128,12 @@ func computeActiveZoneSize(rounds []round, messages []llm.Message, maxTokens int
 }
 
 // partitionMessages divides messages into frozen, compress, and active zones.
-// Frozen zone is always messages[0:2]. Active zone preserves the K most
-// recent complete rounds based on available token budget.
+// Frozen zone is always messages[0:2] and is always kept, so its tokens are
+// charged against the active-zone budget. Active zone preserves the K most
+// recent complete rounds that fit the remaining budget. Whenever the most
+// recent round fits, it is always kept: it holds the tool call and result the
+// model has not seen yet. Only a most recent round too large to fit next to
+// the frozen zone is summarized, so the conversation can continue.
 func partitionMessages(messages []llm.Message, maxTokens int, prevSummaryTokenEstimate int) partitionResult {
 	result := partitionResult{frozenEnd: 2}
 	if len(messages) <= 2 {
@@ -142,16 +147,28 @@ func partitionMessages(messages []llm.Message, maxTokens int, prevSummaryTokenEs
 		return result
 	}
 
-	result.activeCount = computeActiveZoneSize(result.rounds, messages, maxTokens, prevSummaryTokenEstimate)
-	if result.activeCount >= len(result.rounds) {
-		// Everything fits — no compression needed.
+	reserved := CountMessagesTokens(messages[:result.frozenEnd]) + prevSummaryTokenEstimate
+	result.activeCount = computeActiveZoneSize(result.rounds, messages, maxTokens, reserved)
+	if result.activeCount == 0 {
+		// Even the most recent round does not fit next to the frozen zone:
+		// summarize everything, lossy but better than stopping the review.
 		result.compressEnd = len(messages)
-		result.activeCount = 0
+		return result
+	}
+	if result.activeCount >= len(result.rounds) {
+		// Everything fits (the async soft-threshold case): summarize every
+		// round except the most recent one.
+		result.activeCount = 1
+	}
+
+	activeStartIdx := len(result.rounds) - result.activeCount
+	if activeStartIdx == 0 {
+		// Only the protected most recent round remains: nothing to compress.
+		result.compressEnd = result.frozenEnd
 		return result
 	}
 
 	// compressEnd = index after the last round NOT in active zone.
-	activeStartIdx := len(result.rounds) - result.activeCount
 	lastCompressRound := result.rounds[activeStartIdx-1]
 	if len(lastCompressRound.toolIdxs) > 0 {
 		result.compressEnd = lastCompressRound.toolIdxs[len(lastCompressRound.toolIdxs)-1] + 1

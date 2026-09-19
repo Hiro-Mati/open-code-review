@@ -401,8 +401,14 @@ func (c *blockingScanCompressionClient) CompletionsWithCtx(ctx context.Context, 
 	r := c.round
 	c.mu.Unlock()
 
-	if r == 1 {
-		content := strings.Repeat("word ", 650)
+	// Round 1 is small; round 2 pushes the conversation past the soft
+	// threshold. Compression never summarizes the most recent round, so the
+	// async job needs round 1 as an older round to compress.
+	if r <= 2 {
+		content := "ok"
+		if r == 2 {
+			content = strings.Repeat("word ", 650)
+		}
 		return &llm.ChatResponse{
 			Choices: []llm.Choice{{
 				Message: llm.ResponseMessage{
@@ -421,7 +427,7 @@ func (c *blockingScanCompressionClient) CompletionsWithCtx(ctx context.Context, 
 		}, nil
 	}
 
-	// Round 2+: wait until the background compression goroutine has reached
+	// Round 3+: wait until the background compression goroutine has reached
 	// the mock (closed c.started) before returning task_done. This eliminates
 	// the race where the main loop finishes before compression starts,
 	// ensuring WaitBackground is the only thing holding Run open.

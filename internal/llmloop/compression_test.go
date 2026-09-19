@@ -4,10 +4,13 @@
 package llmloop
 
 import (
+	"context"
 	"strings"
 	"testing"
 
+	"github.com/alibaba/open-code-review/internal/config/template"
 	"github.com/alibaba/open-code-review/internal/llm"
+	"github.com/alibaba/open-code-review/internal/tool"
 )
 
 func msg(role, text string) llm.Message {
@@ -123,11 +126,159 @@ func TestPartitionMessages_EverythingFits(t *testing.T) {
 		msg("tool", "ok"),
 	}
 	result := partitionMessages(messages, 100000, 0)
-	if result.activeCount != 0 {
-		t.Errorf("activeCount = %d, want 0 (everything fits)", result.activeCount)
+	// The only round is the most recent one, so nothing may be compressed.
+	if result.activeCount != 1 {
+		t.Errorf("activeCount = %d, want 1 (most recent round kept)", result.activeCount)
 	}
-	if result.compressEnd != len(messages) {
-		t.Errorf("compressEnd = %d, want %d", result.compressEnd, len(messages))
+	if result.compressEnd != result.frozenEnd {
+		t.Errorf("compressEnd = %d, want %d (nothing to compress)", result.compressEnd, result.frozenEnd)
+	}
+}
+
+func TestPartitionMessages_EverythingFitsKeepsMostRecentRound(t *testing.T) {
+	messages := []llm.Message{
+		msg("system", "sys"),
+		msg("user", "prompt"),
+		msg("assistant", "first"),
+		msg("tool", "ok"),
+		msg("assistant", "second"),
+		msg("tool", "ok"),
+	}
+	result := partitionMessages(messages, 100000, 0)
+	if result.activeCount != 1 {
+		t.Errorf("activeCount = %d, want 1", result.activeCount)
+	}
+	if result.compressEnd != 4 {
+		t.Errorf("compressEnd = %d, want 4 (older round only)", result.compressEnd)
+	}
+}
+
+// bigFrozenZone returns a system + user head that alone uses most of a
+// 10000-token budget, like a group prompt carrying large diffs.
+func bigFrozenZone() []llm.Message {
+	return []llm.Message{msg("system", "sys"), msg("user", strings.Repeat("word ", 5000))}
+}
+
+func TestPartitionMessages_ChargesFrozenZone(t *testing.T) {
+	const maxTokens = 10000
+	messages := bigFrozenZone()
+	for i := 0; i < 8; i++ {
+		messages = append(messages, msg("assistant", "a"))
+		messages = append(messages, llm.NewToolResultMessage("c", strings.Repeat("data ", 1400)))
+	}
+
+	p := partitionMessages(messages, maxTokens, 0)
+	kept := CountMessagesTokens(messages[:p.frozenEnd]) + CountMessagesTokens(messages[p.compressEnd:])
+	if kept > PromptTokenLimit(maxTokens) {
+		t.Fatalf("frozen + active zone = %d tokens, over the %d limit (compressEnd=%d activeCount=%d)",
+			kept, PromptTokenLimit(maxTokens), p.compressEnd, p.activeCount)
+	}
+	if p.activeCount < 1 || p.compressEnd >= len(messages) {
+		t.Fatalf("most recent round must stay active: compressEnd=%d activeCount=%d", p.compressEnd, p.activeCount)
+	}
+}
+
+// A most recent round too large to fit next to the frozen zone falls back to
+// being summarized, so the review continues instead of stopping.
+func TestPartitionMessages_OversizedLatestRoundIsCompressible(t *testing.T) {
+	messages := bigFrozenZone()
+	messages = append(messages, msg("assistant", "a"), msg("tool", "small"))
+	messages = append(messages, msg("assistant", "b"), msg("tool", strings.Repeat("data ", 4000)))
+
+	p := partitionMessages(messages, 10000, 0)
+	if p.activeCount != 0 {
+		t.Errorf("activeCount = %d, want 0", p.activeCount)
+	}
+	if p.compressEnd != len(messages) {
+		t.Errorf("compressEnd = %d, want %d (oversized latest round is compressible)", p.compressEnd, len(messages))
+	}
+}
+
+func compressionTestRunner(client *fakeClient) *Runner {
+	summary := "short summary"
+	for i := 0; i < 2; i++ {
+		client.responses = append(client.responses, &llm.ChatResponse{
+			Choices: []llm.Choice{{Message: llm.ResponseMessage{Content: &summary}}},
+		})
+	}
+	deps := newTestDeps(client)
+	deps.Template = template.Template{MaxTokens: 10000, MaxToolRequestTimes: 10,
+		MemoryCompressionTask: template.LlmConversation{
+			Messages: []template.ChatMessage{{Role: "user", Content: "summarize {{context}}"}},
+		}}
+	return NewRunner(deps)
+}
+
+func fileReadRound(id string) ([]llm.ToolCall, []tool.ToolCallResult) {
+	calls := []llm.ToolCall{{ID: id, Type: "function", Function: llm.FunctionCall{Name: "file_read", Arguments: "{}"}}}
+	results := []tool.ToolCallResult{{ToolCallID: id, Name: "file_read", Result: strings.Repeat("data ", 1400)}}
+	return calls, results
+}
+
+// A large frozen zone must shrink the kept history enough for the
+// conversation to continue instead of stopping with StopCompression.
+func TestAddNextMessage_CompressionAccountsForFrozenZone(t *testing.T) {
+	client := &fakeClient{}
+	r := compressionTestRunner(client)
+	msgs := bigFrozenZone()
+	for i := 0; i < 7; i++ {
+		calls, results := fileReadRound("c")
+		msgs = append(msgs, llm.NewToolCallMessage("", calls, llm.NativeTurn{}, ""))
+		msgs = append(msgs, llm.NewToolResultMessage("c", results[0].Result))
+	}
+
+	calls, results := fileReadRound("c9")
+	ok := r.addNextMessage(context.Background(), "", calls, llm.NativeTurn{}, "", results, &msgs, "k", &compressionState{})
+	if !ok {
+		t.Fatalf("conversation stopped at %d tokens although compressing older rounds fits the limit",
+			CountMessagesTokens(msgs))
+	}
+	if got := CountMessagesTokens(msgs); got >= PromptTokenLimit(10000) {
+		t.Fatalf("tokens after compression = %d, want < %d", got, PromptTokenLimit(10000))
+	}
+}
+
+// The round just executed (tool call + result) fits next to the frozen zone,
+// so it must survive compression; only older rounds are summarized.
+func TestAddNextMessage_KeepsCurrentRound(t *testing.T) {
+	client := &fakeClient{}
+	r := compressionTestRunner(client)
+	msgs := bigFrozenZone()
+	for i := 0; i < 2; i++ {
+		calls, results := fileReadRound("c")
+		msgs = append(msgs, llm.NewToolCallMessage("", calls, llm.NativeTurn{}, ""))
+		msgs = append(msgs, llm.NewToolResultMessage("c", results[0].Result))
+	}
+
+	calls, results := fileReadRound("c9")
+	ok := r.addNextMessage(context.Background(), "", calls, llm.NativeTurn{}, "", results, &msgs, "k", &compressionState{})
+	if !ok {
+		t.Fatalf("conversation stopped at %d tokens", CountMessagesTokens(msgs))
+	}
+	n := len(msgs)
+	if n < 4 || msgs[n-2].Role != "assistant" || msgs[n-1].Role != "tool" || msgs[n-1].ToolCallID != "c9" {
+		t.Fatalf("current round (tool call c9 + result) was summarized away; %d messages left", n)
+	}
+}
+
+// A single huge tool result must not end the review: the oversized latest
+// round is summarized and the conversation continues.
+func TestAddNextMessage_OversizedLatestRoundContinues(t *testing.T) {
+	client := &fakeClient{}
+	r := compressionTestRunner(client)
+	msgs := bigFrozenZone()
+	calls, results := fileReadRound("c")
+	msgs = append(msgs, llm.NewToolCallMessage("", calls, llm.NativeTurn{}, ""))
+	msgs = append(msgs, llm.NewToolResultMessage("c", "small"))
+
+	calls, results = fileReadRound("c9")
+	results[0].Result = strings.Repeat("data ", 4000)
+	ok := r.addNextMessage(context.Background(), "", calls, llm.NativeTurn{}, "", results, &msgs, "k", &compressionState{})
+	if !ok {
+		t.Fatalf("conversation stopped at %d tokens; oversized latest round should be summarized", CountMessagesTokens(msgs))
+	}
+	if len(client.requests) == 0 {
+		t.Fatal("compression LLM was not called")
 	}
 }
 
