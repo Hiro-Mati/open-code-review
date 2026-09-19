@@ -65,7 +65,9 @@ type groupingSessionOpts struct {
 
 // groupDiffs calls the LLM with file metadata (no diff content) to produce
 // semantic groups. Falls back to one-file-per-group on any error.
-func groupDiffs(ctx context.Context, diffs []model.Diff, client llm.LLMClient, modelName string, tpl template.Template, tokenLimit int, sessOpts *groupingSessionOpts) groupDiffsResult {
+//
+// tokenLimit and groupTokens drive enforceGroupTokenBudget; see there.
+func groupDiffs(ctx context.Context, diffs []model.Diff, client llm.LLMClient, modelName string, tpl template.Template, tokenLimit int, groupTokens groupTokenCounter, sessOpts *groupingSessionOpts) groupDiffsResult {
 	if len(diffs) <= 1 {
 		// Nothing to partition, whatever the thresholds say. This short-circuit is
 		// unconditional and must stay ahead of GroupingPlan, which returns
@@ -90,7 +92,7 @@ func groupDiffs(ctx context.Context, diffs []model.Diff, client llm.LLMClient, m
 	// Template.GroupingPlan.
 	totalChanged, _ := diffsChurn(diffs)
 	if strategy := tpl.GroupingPlan(len(diffs), totalChanged); strategy != template.GroupingViaLLM {
-		return groupDiffsResult{groups: groupWithoutLLM(ctx, diffs, strategy, tpl, totalChanged, tokenLimit)}
+		return groupDiffsResult{groups: groupWithoutLLM(ctx, diffs, strategy, tpl, totalChanged, tokenLimit, groupTokens)}
 	}
 
 	if tpl.GroupingTask == nil || len(tpl.GroupingTask.Messages) == 0 {
@@ -103,7 +105,7 @@ func groupDiffs(ctx context.Context, diffs []model.Diff, client llm.LLMClient, m
 		return groupDiffsResult{groups: toSingleFileGroups(diffs), usage: usage}
 	}
 
-	groups = enforceGroupTokenBudget(groups, tokenLimit)
+	groups = enforceGroupTokenBudget(groups, tokenLimit, groupTokens)
 	return groupDiffsResult{groups: groups, usage: usage}
 }
 
@@ -112,7 +114,7 @@ func groupDiffs(ctx context.Context, diffs []model.Diff, client llm.LLMClient, m
 // the decision but not the thresholds, which ride on the telemetry event
 // instead: a threshold of 0 disables its step, and there is then no meaningful
 // comparison for the log line to claim.
-func groupWithoutLLM(ctx context.Context, diffs []model.Diff, strategy template.GroupingStrategy, tpl template.Template, totalChanged int64, tokenLimit int) []FileGroup {
+func groupWithoutLLM(ctx context.Context, diffs []model.Diff, strategy template.GroupingStrategy, tpl template.Template, totalChanged int64, tokenLimit int, groupTokens groupTokenCounter) []FileGroup {
 	groups := toSingleFileGroups(diffs)
 	if strategy == template.GroupingBundleAll {
 		// enforceMaxFilesPerGroup guards a GroupingMinFiles raised past
@@ -128,7 +130,7 @@ func groupWithoutLLM(ctx context.Context, diffs []model.Diff, strategy template.
 		// which pays the fixed prompt overhead once per file, while a bundle's
 		// files share one conversation.
 		groups = enforceMaxFilesPerGroup([]FileGroup{{Label: smallChangeSetLabel, Diffs: diffs}})
-		groups = enforceGroupTokenBudget(groups, tokenLimit)
+		groups = enforceGroupTokenBudget(groups, tokenLimit, groupTokens)
 	}
 
 	// The log describes the partition that came out, not the one GroupingPlan
@@ -341,29 +343,51 @@ func enforceMaxFilesPerGroup(groups []FileGroup) []FileGroup {
 	return result
 }
 
-// enforceGroupTokenBudget splits groups whose combined diffs exceed the token limit.
-func enforceGroupTokenBudget(groups []FileGroup, tokenLimit int) []FileGroup {
+// groupTokenCounter returns the prompt size, in tokens, that reviewing diffs
+// as one group would send.
+type groupTokenCounter func(diffs []model.Diff) int
+
+// enforceGroupTokenBudget splits groups whose prompt would exceed the token
+// limit into per-file groups.
+//
+// The size that matters is the rendered prompt, not the diffs alone:
+// checkPromptBudget measures the main-task messages, which add the template,
+// the merged system rules and the list of other changed files around the
+// diffs. Summing only raw diff tokens let a group just under the limit
+// through, and its round 1 then failed the prompt check with every file
+// marked failed, although each file would have fit on its own. groupTokens
+// renders that prompt (Agent.groupPromptTokens); nil falls back to the raw
+// diff sum for callers that have no template to render.
+func enforceGroupTokenBudget(groups []FileGroup, tokenLimit int, groupTokens groupTokenCounter) []FileGroup {
 	if tokenLimit <= 0 {
 		return groups
 	}
+	if groupTokens == nil {
+		groupTokens = rawDiffTokens
+	}
 	var result []FileGroup
 	for _, g := range groups {
-		total := int64(0)
-		for _, d := range g.Diffs {
-			total += int64(llm.CountTokens(d.Diff))
-		}
-		if total <= int64(tokenLimit) {
+		if groupTokens(g.Diffs) <= tokenLimit {
 			result = append(result, g)
-		} else {
-			for _, d := range g.Diffs {
-				result = append(result, FileGroup{
-					Label: g.Label + " (split: " + d.NewPath + ")",
-					Diffs: []model.Diff{d},
-				})
-			}
+			continue
+		}
+		for _, d := range g.Diffs {
+			result = append(result, FileGroup{
+				Label: g.Label + " (split: " + d.NewPath + ")",
+				Diffs: []model.Diff{d},
+			})
 		}
 	}
 	return result
+}
+
+// rawDiffTokens sums the tokens of the diffs alone, without prompt overhead.
+func rawDiffTokens(diffs []model.Diff) int {
+	total := 0
+	for _, d := range diffs {
+		total += llm.CountTokens(d.Diff)
+	}
+	return total
 }
 
 // fileGroupKey returns a deterministic key for a file group: sorted paths joined by comma.

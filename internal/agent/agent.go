@@ -655,7 +655,7 @@ func (a *Agent) dispatchSubtasks(ctx context.Context) ([]model.LlmComment, error
 
 	// Group files semantically via LLM.
 	groupResult := groupDiffs(ctx, nonDeleted, a.args.LLMClient, a.args.Model,
-		a.args.Template, llmloop.PromptTokenLimit(a.args.Template.MaxTokens),
+		a.args.Template, llmloop.PromptTokenLimit(a.args.Template.MaxTokens), a.groupPromptTokens,
 		&groupingSessionOpts{session: a.session, provider: a.args.Provider, model: a.args.Model})
 	groups := groupResult.groups
 	a.fileGroups = groups
@@ -1315,6 +1315,17 @@ func (a *Agent) buildMainTaskMessages(rule, changeFiles, diffs, planResult, conf
 		messages = append(messages, llm.NewTextMessage(m.Role, content))
 	}
 	return messages
+}
+
+// groupPromptTokens measures the round-1 main-task prompt for a group of diffs
+// the way executeGroupSubtask renders it and checkPromptBudget counts it, so
+// enforceGroupTokenBudget splits on the same number the round-1 check later
+// rejects on. The plan guidance is not known yet and is left out; it is the one
+// part of the round-1 prompt this cannot foresee.
+func (a *Agent) groupPromptTokens(diffs []model.Diff) int {
+	messages := a.buildMainTaskMessages(a.resolveGroupSystemRule(diffs), a.buildChangeFilesExceptGroup(diffs),
+		buildConcatenatedDiffs(diffs), "", "")
+	return llmloop.CountMessagesTokens(messages)
 }
 
 // checkPromptBudget validates that the rendered messages fit within the token
