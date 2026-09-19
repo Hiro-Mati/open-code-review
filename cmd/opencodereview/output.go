@@ -358,6 +358,12 @@ func outputJSONWithWarnings(comments []model.LlmComment, warnings []agent.AgentW
 	manifest *session.RunManifest, budgetExceeded bool, llmIdentity *jsonLLMIdentity, out io.Writer,
 	retryReport *llm.RetryReport, groups []agent.FileGroupInfo) error {
 	publishedWarnings := warningsForOutput(warnings, manifest)
+	// Agent.Run returns nil comments when a run fails, but a manifest still
+	// routes it here; normalize so consumers always see "comments": [] and
+	// never null, matching outputJSONNoFiles and the SARIF writer.
+	if comments == nil {
+		comments = []model.LlmComment{}
+	}
 	payload := jsonOutput{
 		Status:   "success",
 		LLM:      llmIdentity,

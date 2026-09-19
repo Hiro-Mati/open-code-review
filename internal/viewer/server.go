@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 //go:embed templates/*.html static/style.css static/pager.js static/a11y.js static/session.js static/repos.js static/sessions.js static/icons/*.svg
@@ -475,9 +476,16 @@ func dictKV(keysAndValues ...any) (map[string]any, error) {
 	return m, nil
 }
 
+// truncateText shortens s to at most n bytes, appending an ellipsis when it
+// cuts. The cut backs off to the previous rune boundary so it never lands
+// inside a multi-byte UTF-8 sequence (file paths in session.html may be
+// non-ASCII); slicing at a raw byte offset would emit invalid UTF-8.
 func truncateText(n int, s string) string {
 	if len(s) <= n {
 		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
 	}
 	return s[:n] + "…"
 }

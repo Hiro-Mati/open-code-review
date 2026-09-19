@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -752,5 +753,47 @@ func TestOutputPreview_SarifRejects(t *testing.T) {
 	err := outputPreview(p, "sarif", os.Stdout)
 	if err == nil {
 		t.Error("outputPreview should return an error for sarif format")
+	}
+}
+
+// artifactLocation.uri must be a valid URI reference (SARIF 2.1.0 section
+// 3.4.3), so reserved characters in a repository path are percent-encoded per
+// segment. A raw "#" would start a fragment and a raw "%" would be decoded,
+// making consumers resolve the finding to the wrong file.
+func TestSarifArtifactURI_EncodesPathSegments(t *testing.T) {
+	tests := []struct {
+		path string
+		want string
+	}{
+		{"internal/agent/agent.go", "internal/agent/agent.go"},
+		{"docs/C# notes/100%.md", "docs/C%23%20notes/100%25.md"},
+		{"a?b/c;d,e.go", "a%3Fb/c%3Bd%2Ce.go"},
+		{"c:/x.go", "c%3A/x.go"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			c := model.LlmComment{
+				Path: tt.path, Content: "x", Category: "bug", Severity: "low",
+				StartLine: 1, EndLine: 1, ExistingCode: "old", SuggestionCode: "new",
+			}
+			result := sarifResultFromComment(c)
+			uris := []string{
+				result.Locations[0].PhysicalLocation.ArtifactLocation.URI,
+				result.Fixes[0].ArtifactChanges[0].ArtifactLocation.URI,
+			}
+			for _, uri := range uris {
+				if uri != tt.want {
+					t.Errorf("uri = %q, want %q", uri, tt.want)
+				}
+				u, err := url.Parse(uri)
+				if err != nil {
+					t.Fatalf("uri %q is not a valid URI reference: %v", uri, err)
+				}
+				if u.Scheme != "" || u.Fragment != "" || u.RawQuery != "" || u.Path != tt.path {
+					t.Errorf("uri %q resolves to scheme=%q path=%q query=%q fragment=%q, want path %q",
+						uri, u.Scheme, u.Path, u.RawQuery, u.Fragment, tt.path)
+				}
+			}
+		})
 	}
 }

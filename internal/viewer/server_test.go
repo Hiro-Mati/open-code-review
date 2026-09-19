@@ -6,6 +6,7 @@ package viewer
 import (
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestTruncateText(t *testing.T) {
@@ -20,14 +21,20 @@ func TestTruncateText(t *testing.T) {
 		{"truncated with ellipsis", 3, "hello", "hel…"},
 		{"empty string", 5, "", ""},
 		{"n=0 always truncates non-empty", 0, "hi", "…"},
-		{"unicode shorter than n bytes", 20, "你好世界", "你好世界"},     // allow-non-english: fixture exercises rune-boundary truncation
-		{"unicode truncated at byte boundary", 6, "你好世界", "你好…"}, // allow-non-english: fixture exercises rune-boundary truncation
+		{"unicode shorter than n bytes", 20, "你好世界", "你好世界"},           // allow-non-english: fixture exercises rune-boundary truncation
+		{"unicode truncated at byte boundary", 6, "你好世界", "你好…"},       // allow-non-english: fixture exercises rune-boundary truncation
+		{"cut inside a rune backs off to its start", 7, "你好世界", "你好…"}, // allow-non-english: fixture exercises rune-boundary truncation
+		{"cut inside the first rune keeps nothing", 2, "你好", "…"},      // allow-non-english: fixture exercises rune-boundary truncation
+		{"ascii prefix then multi-byte path", 5, "src/é.go", "src/…"},  // allow-non-english: fixture exercises rune-boundary truncation
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := truncateText(tt.n, tt.s)
 			if got != tt.want {
 				t.Errorf("truncateText(%d, %q) = %q, want %q", tt.n, tt.s, got, tt.want)
+			}
+			if !utf8.ValidString(got) {
+				t.Errorf("truncateText(%d, %q) = %q is not valid UTF-8", tt.n, tt.s, got)
 			}
 		})
 	}

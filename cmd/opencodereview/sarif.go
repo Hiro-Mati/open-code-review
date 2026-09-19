@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -243,7 +244,7 @@ func sarifResultFromComment(c model.LlmComment) sarifResult {
 	if c.Path != "" {
 		loc := sarifLocation{
 			PhysicalLocation: sarifPhysicalLocation{
-				ArtifactLocation: sarifArtifactLocation{URI: c.Path},
+				ArtifactLocation: sarifArtifactLocation{URI: sarifArtifactURI(c.Path)},
 			},
 		}
 		if hasRegion {
@@ -268,13 +269,30 @@ func sarifResultFromComment(c model.LlmComment) sarifResult {
 		}
 		result.Fixes = []sarifFix{{
 			ArtifactChanges: []sarifArtifactChange{{
-				ArtifactLocation: sarifArtifactLocation{URI: c.Path},
+				ArtifactLocation: sarifArtifactLocation{URI: sarifArtifactURI(c.Path)},
 				Replacements:     []sarifReplacement{rep},
 			}},
 		}}
 	}
 
 	return result
+}
+
+// sarifArtifactURI converts a repository-relative path into the relative URI
+// reference SARIF 2.1.0 requires for artifactLocation.uri (section 3.4.3). A raw
+// path is not a valid URI reference: "#" would start a fragment, "?" a query,
+// "%xx" would be decoded, and a ":" in the first segment would read as a
+// scheme. Each segment is percent-encoded separately so the "/" separators
+// survive and consumers resolve the URI back to the original path.
+func sarifArtifactURI(path string) string {
+	segments := strings.Split(path, "/")
+	for i, seg := range segments {
+		// PathEscape leaves ":" alone because it is legal inside a path segment,
+		// but in the first segment of a relative reference it would be parsed as
+		// a scheme delimiter; %3A decodes to the same path everywhere.
+		segments[i] = strings.ReplaceAll(url.PathEscape(seg), ":", "%3A")
+	}
+	return strings.Join(segments, "/")
 }
 
 // sarifFingerprints builds a stable partialFingerprints entry for a finding.

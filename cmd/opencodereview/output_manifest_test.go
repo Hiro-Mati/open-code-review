@@ -4,8 +4,11 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/alibaba/open-code-review/internal/agent"
 	"github.com/alibaba/open-code-review/internal/session"
@@ -133,5 +136,25 @@ func TestManifestMessage(t *testing.T) {
 				t.Errorf("manifestMessage = %q, want substring %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestOutputJSONWithWarnings_FailedRunCommentsNotNull pins that a failed run --
+// Agent.Run returns nil comments but a manifest still routes the result through
+// outputJSONWithWarnings -- emits "comments": [] rather than null, matching
+// outputJSONNoFiles and the SARIF writer.
+func TestOutputJSONWithWarnings_FailedRunCommentsNotNull(t *testing.T) {
+	m := &session.RunManifest{SchemaVersion: session.ManifestSchemaVersion, TerminalState: session.StateFailed}
+	var buf bytes.Buffer
+	if err := outputJSONWithWarnings(nil, nil, 1, 0, 0, 0, 0, 0, time.Second, "", nil, nil, "",
+		nil, "", m, false, nil, &buf, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(buf.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
+	}
+	if got := string(payload["comments"]); got != "[]" {
+		t.Errorf("comments = %s, want []", got)
 	}
 }
