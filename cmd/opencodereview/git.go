@@ -25,7 +25,7 @@ func runGitCmdStdout(repoDir string, args ...string) ([]byte, error) {
 }
 
 func getCommitMessage(repoDir, commit string) (string, error) {
-	out, err := runGitCmd(repoDir, "log", "-1", "--format=%B", "--end-of-options", commit)
+	out, err := runGitCmdStdout(repoDir, "log", "-1", "--format=%B", "--end-of-options", commit)
 	if err != nil {
 		return "", fmt.Errorf("git log failed: %w", err)
 	}

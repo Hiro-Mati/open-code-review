@@ -246,14 +246,15 @@ func (p *Provider) gitLs(ctx context.Context, args ...string) ([]string, error) 
 	cmdArgs := append([]string{"-c", "core.quotepath=false", "ls-files"}, args...)
 	var out string
 	var err error
+	// Use stdout only, not combined output: with -z, git emits NUL-delimited
+	// paths on stdout, and merging stderr in would corrupt the filename
+	// parsing below. This holds for the runner path as much as the direct one.
 	if p.runner != nil {
-		out, err = p.runner.Run(ctx, p.repoDir, cmdArgs...)
+		raw, runErr := p.runner.Output(ctx, p.repoDir, cmdArgs...)
+		out, err = string(raw), runErr
 	} else {
 		cmd := exec.CommandContext(ctx, "git", cmdArgs...)
 		cmd.Dir = p.repoDir
-		// Use Output (stdout only), not CombinedOutput: with -z, git emits
-		// NUL-delimited paths on stdout, and merging stderr in would corrupt
-		// the filename parsing below.
 		raw, runErr := cmd.Output()
 		out, err = string(raw), runErr
 	}

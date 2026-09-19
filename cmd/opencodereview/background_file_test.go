@@ -395,3 +395,17 @@ func TestResolveBackground_AllCases(t *testing.T) {
 		}
 	})
 }
+
+// TestGetCommitMessage_IgnoresGitStderr verifies git's stderr (here, GIT_TRACE
+// lines) is not prepended to the commit message used as review background.
+func TestGetCommitMessage_IgnoresGitStderr(t *testing.T) {
+	repo, hash := initRepoWithCommit(t, "real message")
+	t.Setenv("GIT_TRACE", "1")
+	got, err := getCommitMessage(repo, hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "real message" {
+		t.Errorf("getCommitMessage = %q, want %q", got, "real message")
+	}
+}

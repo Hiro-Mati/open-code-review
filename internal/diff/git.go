@@ -724,13 +724,18 @@ func (p *Provider) untrackedFilesList(ctx context.Context) ([]string, error) {
 	return files, nil
 }
 
+// runGit returns git's stdout only. Every caller parses the output as data (a
+// SHA, a parent list, a URL) and discards it on error, so stderr must stay out:
+// a warning such as "refname 'main' is ambiguous" would otherwise be read as
+// the first line of the result.
 func (p *Provider) runGit(ctx context.Context, args ...string) (string, error) {
 	if p.runner != nil {
-		return p.runner.Run(ctx, p.repoDir, args...)
+		out, err := p.runner.Output(ctx, p.repoDir, args...)
+		return string(out), err
 	}
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = p.repoDir
-	out, err := cmd.CombinedOutput()
+	out, err := cmd.Output()
 	return string(out), err
 }
 

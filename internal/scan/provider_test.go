@@ -13,6 +13,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/alibaba/open-code-review/internal/gitcmd"
 )
 
 func TestCountLines(t *testing.T) {
@@ -240,5 +242,26 @@ func TestProvider_Enumerate_PathFilter(t *testing.T) {
 	want := []string{"pkg/b.go", "pkg/sub/c.go"}
 	if !reflect.DeepEqual(paths, want) {
 		t.Errorf("paths = %v, want %v", paths, want)
+	}
+}
+
+// TestEnumerate_RunnerIgnoresGitStderr verifies stderr output (here, GIT_TRACE
+// lines) never reaches the NUL-delimited path parsing on the runner path.
+func TestEnumerate_RunnerIgnoresGitStderr(t *testing.T) {
+	repo := initTestRepo(t)
+	writeFile(t, repo, "main.go", []byte("package main\n"))
+	gitCommit(t, repo, "init")
+	t.Setenv("GIT_TRACE", "1")
+
+	items, err := NewProvider(repo, nil, gitcmd.New(0), 0).Enumerate(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Path != "main.go" {
+		paths := make([]string, len(items))
+		for i, it := range items {
+			paths[i] = it.Path
+		}
+		t.Fatalf("expected only main.go, got %q", paths)
 	}
 }
