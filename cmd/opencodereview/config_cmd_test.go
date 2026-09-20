@@ -45,6 +45,27 @@ func TestSetConfigValueProvider(t *testing.T) {
 	}
 }
 
+// TestSetConfigValueProviderRejectsEmptyName pins that `config set provider ""`
+// fails instead of storing a custom provider keyed by an empty name, and leaves
+// the existing selection untouched.
+func TestSetConfigValueProviderRejectsEmptyName(t *testing.T) {
+	for _, value := range []string{"", "   ", "\t"} {
+		t.Run(strconv.Quote(value), func(t *testing.T) {
+			cfg := &Config{Provider: "anthropic", Model: "claude-opus-4-6"}
+
+			if err := setConfigValue(cfg, "provider", value); err == nil {
+				t.Fatal("expected error for empty provider name, got nil")
+			}
+			if cfg.Provider != "anthropic" || cfg.Model != "claude-opus-4-6" {
+				t.Errorf("provider/model changed to %q/%q, want anthropic/claude-opus-4-6", cfg.Provider, cfg.Model)
+			}
+			if _, ok := cfg.CustomProviders[value]; ok {
+				t.Errorf("custom provider %q was created: %#v", value, cfg.CustomProviders)
+			}
+		})
+	}
+}
+
 func TestSetConfigValueProviderURLTrimsAndValidates(t *testing.T) {
 	t.Run("trims a valid URL before storing", func(t *testing.T) {
 		cfg := &Config{}

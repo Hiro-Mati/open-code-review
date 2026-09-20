@@ -457,6 +457,11 @@ func setConfigValue(cfg *Config, key, value string) error {
 
 	switch key {
 	case "provider":
+		// An empty name would be stored as a custom provider keyed by "", which
+		// no resolver path can select. Clearing the provider is 'config unset'.
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("provider name must not be empty; use 'ocr config unset provider' to clear it")
+		}
 		if cfg.Provider != value {
 			cfg.Model = ""
 		}
