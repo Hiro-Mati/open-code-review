@@ -727,6 +727,15 @@ func (r *Runner) executeToolCall(ctx context.Context, taskKey string, call llm.T
 							"comment filed against %s describes code in %s; re-filed", from, to))
 					}
 				}
+				// A comment without a path falls back to taskKey, which for a
+				// group of several files is the group key, not a file. When
+				// neither lookup nor cross-file search placed it, no file owns
+				// it: drop it rather than file it under a path no diff has.
+				if d == nil && !located && r.deps.DiffLookup != nil && cm.Path == taskKey {
+					r.RecordWarning("comment_dropped", taskKey,
+						"comment without a path matched no single reviewed file; dropped")
+					continue
+				}
 				if d != nil {
 					if !located && r.deps.Template.ReLocationTask != nil {
 						// rlStart stays ahead of prompt construction, which is

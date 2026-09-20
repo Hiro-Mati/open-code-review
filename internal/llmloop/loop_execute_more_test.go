@@ -327,6 +327,55 @@ func TestExecuteToolCall_CodeCommentDiffResolved(t *testing.T) {
 	}
 }
 
+// TestExecuteToolCall_CodeCommentGroupKeyFallbackDropped covers a comment
+// without a path in a multi-file group: its fallback path is the group key,
+// which names no file, so an unplaceable comment is dropped with a warning.
+func TestExecuteToolCall_CodeCommentGroupKeyFallbackDropped(t *testing.T) {
+	collector := tool.NewCommentCollector()
+	reg := tool.NewRegistry()
+	reg.Register(&tool.CodeCommentProvider{Collector: collector})
+	reg.Freeze()
+
+	diffs := []model.Diff{
+		{OldPath: "a.go", NewPath: "a.go", Diff: "@@ -1 +1,2 @@\n x\n+foo bar"},
+		{OldPath: "b.go", NewPath: "b.go", Diff: "@@ -1 +1,2 @@\n y\n+baz"},
+	}
+	r := NewRunner(Deps{
+		Tools:            reg,
+		CommentCollector: collector,
+		DiffLookup: func(path string) *model.Diff {
+			for i := range diffs {
+				if diffs[i].NewPath == path {
+					return &diffs[i]
+				}
+			}
+			return nil
+		},
+		AllDiffs: func() []model.Diff { return diffs },
+	})
+
+	r.executeToolCall(context.Background(), "a.go,b.go", llm.ToolCall{
+		Function: llm.FunctionCall{
+			Name:      tool.CodeComment.Name(),
+			Arguments: `{"comments":[{"content":"general"},{"content":"placed","existing_code":"baz"}]}`,
+		},
+	}, nil, "")
+
+	comments := collector.Comments()
+	if len(comments) != 1 || comments[0].Path != "b.go" {
+		t.Fatalf("want only the placeable comment, on b.go; got %+v", comments)
+	}
+	var dropped bool
+	for _, w := range r.Warnings() {
+		if w.Type == "comment_dropped" && w.File == "a.go,b.go" {
+			dropped = true
+		}
+	}
+	if !dropped {
+		t.Errorf("want a comment_dropped warning for the group, got %+v", r.Warnings())
+	}
+}
+
 // TestExecuteToolCall_CodeCommentThinkingBackfill covers the thinking backfill:
 // when the current turn carries reasoning content, comments without an explicit
 // thinking get the turn reasoning; explicit thinking wins.
