@@ -1,5 +1,7 @@
 # Relevé complet des défauts — état au 20 septembre 2026
 
+> Les trois pull requests qui regroupaient plusieurs correctifs ont été découpées : #1474 a donné #1502 et #1503, #1481 a donné #1504, #1431 a donné #1505. Le projet compte donc 24 pull requests, une par changement logique.
+
 45 défauts distincts ont été trouvés, en deux vagues : une première série rencontrée en installant l'outil sous Windows, puis l'audit méthodique des cinq zones du code.
 
 **Résumé des états :**
@@ -23,7 +25,7 @@ Aucune correction n'est encore fusionnée : les 20 PR attendent une relecture hu
 |---|---|---|---|
 | 1 | Sous Windows, un délai dépassé sur un script `setup` MCP ne tuait que `cmd.exe` ; l'outil restait bloqué indéfiniment | ✅ Corrigé | PR #1430 |
 | 2 | `file_find` renvoyait les noms accentués sous forme échappée (`"caf\303\251.go"`) | ✅ Corrigé | PR #1431 |
-| 3 | `code_search` gardait un `\r` en fin de ligne sur les fichiers CRLF | ✅ Corrigé | PR #1431 |
+| 3 | `code_search` gardait un `\r` en fin de ligne sur les fichiers CRLF | ✅ Corrigé | PR #1505 |
 | 4 | `--exclude "src\gen\*"` n'excluait rien sous Windows | ⚠️ Question ouverte | Issue #1463 |
 | 5 | Mêmes antislashs dans les motifs de `rule.json` | ⚠️ Question ouverte | Issue #1463 |
 | 6 | Un commentaire portant sur du code supprimé contenant une ligne vide n'était jamais placé | ✅ Corrigé | PR #1432 |
@@ -73,9 +75,9 @@ Aucune correction n'est encore fusionnée : les 20 PR attendent une relecture hu
 | 1 | `file_read_diff` transmettait au modèle le contenu des fichiers secrets | 🔒 Sécurité, signalé en privé | Rapport privé |
 | 2 | La compression de l'historique ne réservait pas la place du prompt fixe | ✅ Corrigé | PR #1473 |
 | 3 | Un arrêt au tour 2 marquait « échoués » des fichiers déjà relus au tour 1 | ✅ Corrigé | PR #1474 |
-| 4 | Un commentaire sur un fichier renommé était perdu du suivi | ✅ Corrigé | PR #1474 |
+| 4 | Un commentaire sur un fichier renommé était perdu du suivi | ✅ Corrigé | PR #1502 |
 | 5 | Le découpage des groupes ignorait le poids du prompt | ✅ Corrigé | PR #1476 |
-| 6 | Un commentaire sans chemin recevait la clé du groupe comme chemin | ✅ Corrigé | PR #1474 |
+| 6 | Un commentaire sans chemin recevait la clé du groupe comme chemin | ✅ Corrigé | PR #1503 |
 | 7 | `expandBraces` cassait les accolades imbriquées | ✅ Corrigé | PR #1477 |
 
 ---
@@ -101,7 +103,7 @@ Aucune correction n'est encore fusionnée : les 20 PR attendent une relecture hu
 | 4 | Les URI SARIF n'étaient pas encodées | ✅ Corrigé | PR #1482 |
 | 5 | Le JSON pouvait contenir `"comments": null` au lieu d'une liste vide | ✅ Corrigé | PR #1482 |
 | 6 | Le visualiseur coupait les caractères UTF-8 en deux | ✅ Corrigé | PR #1482 |
-| 7 | `OCR_ENABLE_TELEMETRY=0` ne pouvait pas désactiver la télémétrie | ✅ Corrigé | PR #1481 |
+| 7 | `OCR_ENABLE_TELEMETRY=0` ne pouvait pas désactiver la télémétrie | ✅ Corrigé | PR #1504 |
 
 ---
 

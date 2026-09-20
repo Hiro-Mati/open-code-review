@@ -4,7 +4,7 @@ Cette page raconte un audit complet du projet [alibaba/open-code-review](https:/
 
 Elle est écrite pour deux lectorats. Les sections **En clair** s'adressent à tout le monde. Les sections **Détail technique** s'adressent aux développeurs.
 
-**Résumé :** 35 défauts prouvés, 29 corrigés dans 20 pull requests, 6 failles de sécurité signalées en privé, 5 questions de conception ouvertes en issues. Chaque correction est accompagnée d'un test qui échoue sans elle.
+**Résumé :** 45 défauts prouvés, 33 corrigés dans 24 pull requests, 6 failles de sécurité signalées en privé, 6 questions de conception ouvertes en 5 issues. Chaque correction est accompagnée d'un test qui échoue sans elle.
 
 ---
 
@@ -99,7 +99,7 @@ Voici les défauts les plus parlants, traduits en conséquences concrètes.
 
 ### Détail technique
 
-Les 29 défauts corrigés, par thème :
+Les 33 défauts corrigés, par thème. Une pull request ne porte qu'un seul changement logique, comme le règlement du projet le demande :
 
 | Thème | Défauts | Pull request |
 |---|---|---|
@@ -107,18 +107,23 @@ Les 29 défauts corrigés, par thème :
 | Filtrage `.gitignore` | `filepath.Match` sur Windows, motifs à barre médiane non ancrés, négations imbriquées ignorées, nom tronqué | [#1471](https://github.com/alibaba/open-code-review/pull/1471) |
 | En-têtes de diff | Chemins protégés par des guillemets, chemins contenant ` b/` | [#1472](https://github.com/alibaba/open-code-review/pull/1472) |
 | Compression de l'historique | Zone figée non décomptée, dernier tour résumé | [#1473](https://github.com/alibaba/open-code-review/pull/1473) |
-| Suivi par fichier | Arrêt tardif, renommage, commentaire sans chemin | [#1474](https://github.com/alibaba/open-code-review/pull/1474) |
+| Arrêt d'un tour tardif | Un arrêt au tour 2 marquait « échoués » des fichiers relus au tour 1 | [#1474](https://github.com/alibaba/open-code-review/pull/1474) |
+| Fichier renommé | Le commentaire restait classé sous l'ancien nom | [#1502](https://github.com/alibaba/open-code-review/pull/1502) |
+| Commentaire sans fichier | Il sortait avec la clé du groupe comme chemin | [#1503](https://github.com/alibaba/open-code-review/pull/1503) |
 | Isolation des sessions | Collision d'encodage, chemins UNC | [#1475](https://github.com/alibaba/open-code-review/pull/1475) |
 | Budget des groupes | Surcoût du prompt non compté | [#1476](https://github.com/alibaba/open-code-review/pull/1476) |
 | Accolades imbriquées | `expandBraces` cassait `{a,{b,c}}` | [#1477](https://github.com/alibaba/open-code-review/pull/1477) |
 | Scan repris | Résultats réutilisés perdus | [#1478](https://github.com/alibaba/open-code-review/pull/1478) |
 | URL Anthropic | `/v1` devenait `/v1/v1/messages` | [#1479](https://github.com/alibaba/open-code-review/pull/1479) |
 | En-têtes HTTP | Fusion sensible à la casse, en-têtes réservés contournables | [#1480](https://github.com/alibaba/open-code-review/pull/1480) |
-| Validation de configuration | Nom de fournisseur vide, télémétrie non désactivable | [#1481](https://github.com/alibaba/open-code-review/pull/1481) |
+| Nom de fournisseur vide | `config set provider ""` créait un fournisseur sans nom | [#1481](https://github.com/alibaba/open-code-review/pull/1481) |
+| Télémétrie désactivable | `OCR_ENABLE_TELEMETRY=0` restait sans effet | [#1504](https://github.com/alibaba/open-code-review/pull/1504) |
 | Encodage des sorties | URI SARIF, `null` en JSON, troncature UTF-8 | [#1482](https://github.com/alibaba/open-code-review/pull/1482) |
 | Guillemets Windows | Scripts `setup` MCP mutilés par `cmd.exe` | [#1483](https://github.com/alibaba/open-code-review/pull/1483) |
 
-Six autres corrections, issues d'une première passe sur Windows, ont été proposées avant l'audit : [#1430](https://github.com/alibaba/open-code-review/pull/1430) (processus survivant à son délai d'attente), [#1431](https://github.com/alibaba/open-code-review/pull/1431) (noms de fichiers accentués), [#1432](https://github.com/alibaba/open-code-review/pull/1432) (lignes vides dans le placement des commentaires), [#1433](https://github.com/alibaba/open-code-review/pull/1433) (métriques comptées deux fois), [#1434](https://github.com/alibaba/open-code-review/pull/1434) (écriture atomique du fichier de configuration), [#1435](https://github.com/alibaba/open-code-review/pull/1435) (suppression de code mort).
+Sept autres corrections, issues d'une première passe sur Windows, ont été proposées avant l'audit : [#1430](https://github.com/alibaba/open-code-review/pull/1430) (processus survivant à son délai d'attente), [#1431](https://github.com/alibaba/open-code-review/pull/1431) (noms de fichiers accentués dans `file_find`), [#1505](https://github.com/alibaba/open-code-review/pull/1505) (retour chariot en trop dans `code_search`), [#1432](https://github.com/alibaba/open-code-review/pull/1432) (lignes vides dans le placement des commentaires), [#1433](https://github.com/alibaba/open-code-review/pull/1433) (métriques comptées deux fois), [#1434](https://github.com/alibaba/open-code-review/pull/1434) (écriture atomique du fichier de configuration), [#1435](https://github.com/alibaba/open-code-review/pull/1435) (suppression de code mort).
+
+**Note sur le découpage.** Trois pull requests regroupaient plusieurs correctifs sans lien entre eux. Elles ont été découpées, car le règlement demande un seul changement logique par pull request : #1474 a donné #1502 et #1503, #1481 a donné #1504, et #1431 a donné #1505. La vérification a porté sur un point précis : la réunion des morceaux reproduit exactement le contenu d'origine, sans rien perdre.
 
 ---
 
