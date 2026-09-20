@@ -712,6 +712,11 @@ func (r *Runner) executeToolCall(ctx context.Context, taskKey string, call llm.T
 				if r.deps.DiffLookup != nil {
 					d = r.deps.DiffLookup(cm.Path)
 				}
+				// A renamed file's diff also answers to its old path, but every
+				// per-file consumer keys on the new one, so re-key the comment.
+				if d != nil && cm.Path == d.OldPath && d.NewPath != "" && d.NewPath != "/dev/null" {
+					cm.Path = d.NewPath
+				}
 				// Resolution order: the comment's own file, then a cross-file
 				// search, then the LLM. The cross-file search precedes the LLM
 				// because it needs the Agent's original ExistingCode, which the

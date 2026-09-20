@@ -327,6 +327,41 @@ func TestExecuteToolCall_CodeCommentDiffResolved(t *testing.T) {
 	}
 }
 
+// TestExecuteToolCall_CodeCommentRenamedOldPath covers a comment filed under a
+// renamed file's old path: it resolves against that diff and is re-keyed to the
+// new path, the key every per-file consumer uses.
+func TestExecuteToolCall_CodeCommentRenamedOldPath(t *testing.T) {
+	collector := tool.NewCommentCollector()
+	reg := tool.NewRegistry()
+	reg.Register(&tool.CodeCommentProvider{Collector: collector})
+	reg.Freeze()
+
+	renamed := &model.Diff{OldPath: "old.go", NewPath: "new.go", IsRenamed: true,
+		Diff: "@@ -1,1 +1,2 @@\n x\n+foo bar"}
+	r := NewRunner(Deps{
+		Tools:            reg,
+		CommentCollector: collector,
+		DiffLookup: func(path string) *model.Diff {
+			if path == renamed.OldPath || path == renamed.NewPath {
+				return renamed
+			}
+			return nil
+		},
+	})
+
+	r.executeToolCall(context.Background(), "new.go", llm.ToolCall{
+		Function: llm.FunctionCall{
+			Name:      tool.CodeComment.Name(),
+			Arguments: `{"comments":[{"content":"issue","existing_code":"foo bar","path":"old.go"}]}`,
+		},
+	}, nil, "")
+
+	comments := collector.Comments()
+	if len(comments) != 1 || comments[0].Path != "new.go" || comments[0].StartLine != 2 {
+		t.Fatalf("want one comment on new.go:2, got %+v", comments)
+	}
+}
+
 // TestExecuteToolCall_CodeCommentThinkingBackfill covers the thinking backfill:
 // when the current turn carries reasoning content, comments without an explicit
 // thinking get the turn reasoning; explicit thinking wins.
