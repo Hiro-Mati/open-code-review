@@ -1526,6 +1526,13 @@ func (a *Agent) executeGroupSubtask(ctx context.Context, g FileGroup) (bool, *su
 				}
 			}
 			class, reason := classifyMainLoopStop(mainStop)
+			if completed {
+				// An earlier round already completed the review; like a failed
+				// later round, a stopped one only ends the extra rounds.
+				a.recordWarning("review_round_failed", groupKey, fmt.Sprintf("round %d: %s", round, reason))
+				fmt.Fprintf(stdout.Writer(), "[ocr] Round %d stopped for group %q: %s (keeping earlier findings)\n", round, groupKey, reason)
+				break
+			}
 			lastStop = &subtaskStop{
 				class:         class,
 				reason:        reason,
