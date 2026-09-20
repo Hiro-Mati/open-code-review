@@ -248,6 +248,9 @@ OCR が最終的なテレメトリ設定を構築する際：
 したがって、config では `telemetry.enabled=false` を保持したまま、実行ごとに
 `OCR_ENABLE_TELEMETRY=1` で有効にできます。
 
+逆に、config で有効になっていても、実行ごとに `OCR_ENABLE_TELEMETRY=0`
+（または `false`、`no`、`off`）でテレメトリを無効にできます。
+
 ## サンプリングとオーバーヘッド
 
 OCR は**すべて**をエクスポートします。サンプリングの設定はありません。OTel のサンプリングは collector の責務です。典型的なレビュー

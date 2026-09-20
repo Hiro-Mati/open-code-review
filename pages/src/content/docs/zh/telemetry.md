@@ -251,6 +251,9 @@ OCR 构建最终遥测配置时：
 因此你可以在 config 中保留 `telemetry.enabled=false`，按运行用
 `OCR_ENABLE_TELEMETRY=1` 开启。
 
+反过来，即使 config 中已开启，也可以按运行用 `OCR_ENABLE_TELEMETRY=0`
+（或 `false`、`no`、`off`）关闭遥测。
+
 ## 采样与开销
 
 OCR 导出**一切**。没有采样配置；OTel 的采样是 collector 的责任。对一次典型评审

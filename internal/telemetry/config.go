@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const (
@@ -40,11 +41,26 @@ func DefaultConfig() Config {
 	}
 }
 
+// envFlag reads a boolean switch from the environment. "1" turns it on and an
+// explicit false-y value ("0", "false", "no", "off", any case) turns it off;
+// set reports whether the variable carried one of those values. Any other value,
+// including unset or empty, leaves the lower-priority setting untouched.
+func envFlag(name string) (value, set bool) {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1":
+		return true, true
+	case "0", "false", "no", "off":
+		return false, true
+	}
+	return false, false
+}
+
 // resolveEnv reads environment variables to override defaults.
-// Environment takes highest priority.
+// Environment takes highest priority, so an explicit false-y value disables a
+// switch that config.json turned on.
 func resolveEnv(cfg *Config) {
-	if os.Getenv("OCR_ENABLE_TELEMETRY") == "1" {
-		cfg.Enabled = true
+	if v, ok := envFlag("OCR_ENABLE_TELEMETRY"); ok {
+		cfg.Enabled = v
 	}
 	if v := os.Getenv("OTEL_SERVICE_NAME"); v != "" {
 		cfg.ServiceName = v
@@ -56,8 +72,8 @@ func resolveEnv(cfg *Config) {
 	if v := os.Getenv("OTEL_EXPORTER_OTLP_PROTOCOL"); v != "" {
 		cfg.OTLPProtocol = v
 	}
-	if os.Getenv("OCR_CONTENT_LOGGING") == "1" {
-		cfg.ContentLog = true
+	if v, ok := envFlag("OCR_CONTENT_LOGGING"); ok {
+		cfg.ContentLog = v
 	}
 }
 

@@ -302,6 +302,9 @@ When OCR builds the final telemetry config:
 So you can leave `telemetry.enabled=false` in the config and flip it
 per-run with `OCR_ENABLE_TELEMETRY=1`.
 
+Conversely, `OCR_ENABLE_TELEMETRY=0` (or `false`, `no`, `off`) switches
+telemetry off for a run even when the config enables it.
+
 ## Sampling and overhead
 
 OCR exports **everything**. There is no sampling configuration; OTel's

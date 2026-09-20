@@ -6,6 +6,7 @@ package telemetry
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 )
 
@@ -264,6 +265,53 @@ func TestResolveConfig(t *testing.T) {
 			t.Error("expected env to override json: Enabled should be true")
 		}
 	})
+
+	// Env has the highest priority in both directions: an explicit false-y
+	// value must switch off what config.json switched on.
+	for _, value := range []string{"0", "false", "FALSE", "no", "off", " 0 "} {
+		t.Run("env "+strconv.Quote(value)+" disables json-enabled switches", func(t *testing.T) {
+			tmp := t.TempDir()
+			path := filepath.Join(tmp, "config.json")
+			data := `{"telemetry": {"enabled": true, "content_logging": true}}`
+			if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+				t.Fatalf("write file: %v", err)
+			}
+
+			t.Setenv("OCR_ENABLE_TELEMETRY", value)
+			t.Setenv("OCR_CONTENT_LOGGING", value)
+
+			cfg := ResolveConfig(path)
+			if cfg.Enabled {
+				t.Errorf("OCR_ENABLE_TELEMETRY=%q should disable telemetry enabled in json", value)
+			}
+			if cfg.ContentLog {
+				t.Errorf("OCR_CONTENT_LOGGING=%q should disable content logging enabled in json", value)
+			}
+		})
+	}
+
+	// Unset, empty or unrecognized values leave the json setting in place.
+	for _, value := range []string{"", "maybe"} {
+		t.Run("env "+strconv.Quote(value)+" keeps json setting", func(t *testing.T) {
+			tmp := t.TempDir()
+			path := filepath.Join(tmp, "config.json")
+			data := `{"telemetry": {"enabled": true, "content_logging": true}}`
+			if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+				t.Fatalf("write file: %v", err)
+			}
+
+			t.Setenv("OCR_ENABLE_TELEMETRY", value)
+			t.Setenv("OCR_CONTENT_LOGGING", value)
+
+			cfg := ResolveConfig(path)
+			if !cfg.Enabled {
+				t.Errorf("OCR_ENABLE_TELEMETRY=%q should keep json enabled=true", value)
+			}
+			if !cfg.ContentLog {
+				t.Errorf("OCR_CONTENT_LOGGING=%q should keep json content_logging=true", value)
+			}
+		})
+	}
 }
 
 func TestHomeConfigPath(t *testing.T) {

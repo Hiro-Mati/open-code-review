@@ -293,6 +293,9 @@ OCR이 최종 텔레메트리 설정을 만들 때의 순서입니다.
 그래서 설정에는 `telemetry.enabled=false`를 남겨 두었다가 필요할 때만
 `OCR_ENABLE_TELEMETRY=1`로 실행 단위로 켤 수 있습니다.
 
+반대로 설정에서 켜 두었더라도 `OCR_ENABLE_TELEMETRY=0`(또는 `false`, `no`,
+`off`)으로 실행 단위로 텔레메트리를 끌 수 있습니다.
+
 ## 샘플링과 부담 {#sampling-and-overhead}
 
 OCR은 **전부** 내보냅니다. 샘플링 설정은 없으며 OTel 샘플링은 컬렉터가 맡을
